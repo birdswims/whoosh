@@ -17,3 +17,8 @@ pub use tls::{client_connector, interoperable_connector, server_acceptor, server
 pub use server::{send_plain, send_tls, AirdropConfig, AirdropReceiver};
 
 pub const SERVICE_TYPE: &str = "_airdrop._tcp.local.";
+
+/// mDNS TXT `flags`. Apple ignores a receiver that sets neither mixed-types
+/// (`0x08`) nor pipelining (`0x04`). `0x80` marks support for `/Discover`.
+/// `136` is `0x88`, the minimum OpenDrop found macOS will keep.
+pub const MDNS_FLAGS: &str = "136";

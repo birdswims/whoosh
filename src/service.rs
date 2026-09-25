@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
-    server_acceptor, AirdropConfig, AirdropReceiver, SERVICE_TYPE as AIRDROP_SERVICE,
+    server_acceptor, AirdropConfig, AirdropReceiver, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -154,9 +154,12 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         println!("airdrop    0.0.0.0:{port}  https");
         let (acceptor, _) = server_acceptor()?;
         let instance = hex::encode(&pin_bytes());
-        if let Ok(advert) =
-            Advertisement::start(AIRDROP_SERVICE, &instance[..12], port, &[("flags", "1")])
-        {
+        if let Ok(advert) = Advertisement::start(
+            AIRDROP_SERVICE,
+            &instance[..12],
+            port,
+            &[("flags", MDNS_FLAGS)],
+        ) {
             adverts.push(advert);
         }
         let airdrop = AirdropReceiver::new(AirdropConfig {
