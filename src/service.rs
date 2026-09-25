@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::native::{
     fingerprint_hex, NativeListener, ReceiveOptions, SERVICE_TYPE as NATIVE_SERVICE,
 };
-use crate::net::awdl_listeners;
+use crate::net::{awdl_listeners, visibility_report};
 use crate::quickshare::{
     random_endpoint_id, serve as serve_quickshare, service_instance_name, EndpointInfo,
     QuickshareConfig, DEVICE_LAPTOP, SERVICE_TYPE as QUICKSHARE_SERVICE,
@@ -65,6 +65,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         println!("pin {pin}");
     }
     println!("saving files to {}", config.dir.display());
+    println!("{}", visibility_report());
 
     let mut tasks = Vec::new();
     let mut adverts = Vec::new();
@@ -81,16 +82,21 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             fingerprint_hex(&listener.fingerprint)
         );
         let instance = hex::encode(&listener.fingerprint[..8]);
-        if let Ok(advert) = Advertisement::start(
+        let fingerprint = fingerprint_hex(&listener.fingerprint);
+        if let Some(advert) = advertise(
+            "native",
             NATIVE_SERVICE,
             &instance,
             listener.local_addr.port(),
-            &[
-                ("n", config.name.as_str()),
-                ("v", "1"),
-                ("fp", &fingerprint_hex(&listener.fingerprint)),
+            vec![
+                ("n".into(), config.name.clone()),
+                ("v".into(), "1".into()),
+                ("fp".into(), fingerprint),
             ],
-        ) {
+        )
+        .await
+        {
+            println!("native     {}  ({instance})", advert.detail());
             adverts.push(advert);
         }
         let options = ReceiveOptions {
@@ -126,12 +132,21 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let info = EndpointInfo::visible(&config.name, DEVICE_LAPTOP);
         let instance = service_instance_name(&endpoint_id)?;
         let txt_name = info.encode_txt()?;
-        if let Ok(advert) = Advertisement::start(
+        if let Some(advert) = advertise(
+            "quickshare",
             QUICKSHARE_SERVICE,
             &instance,
             port,
-            &[("n", txt_name.as_str())],
-        ) {
+            vec![("n".into(), txt_name)],
+        )
+        .await
+        {
+            println!(
+                "quickshare {}  name \"{}\"  ({instance})",
+                advert.detail(),
+                config.name
+            );
+            println!("quickshare open the share sheet and set it to Everyone");
             adverts.push(advert);
         }
         let quick = QuickshareConfig {
@@ -153,15 +168,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let port = listener.local_addr()?.port();
         println!("airdrop    0.0.0.0:{port}  https");
         let (acceptor, _) = server_acceptor()?;
-        let instance = hex::encode(&pin_bytes());
-        if let Ok(advert) = Advertisement::start(
-            AIRDROP_SERVICE,
-            &instance[..12],
-            port,
-            &[("flags", MDNS_FLAGS)],
-        ) {
-            adverts.push(advert);
-        }
         let airdrop = AirdropReceiver::new(AirdropConfig {
             dir: config.dir.clone(),
             name: config.name.clone(),
@@ -178,7 +184,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 .serve_tls(listener, primary_acceptor, cancel_air)
                 .await;
         }));
-        for addr in awdl_listeners(port) {
+        let awdl = awdl_listeners(port);
+        if awdl.is_empty() && cfg!(target_os = "macos") {
+            println!("airdrop    awdl0 has no IPv6 address, so an iPhone cannot connect");
+        }
+        for addr in awdl {
             match TcpListener::bind(addr).await {
                 Ok(extra) => {
                     println!("airdrop    {addr}  awdl");
@@ -189,11 +199,34 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                         let _ = receiver.serve_tls(extra, acceptor, cancel).await;
                     }));
                 }
-                Err(error) => tracing::debug!(%error, %addr, "awdl listener was not bound"),
+                Err(error) => {
+                    println!("airdrop    {addr}  awdl not bound: {error}");
+                }
             }
+        }
+        let instance = hex::encode(&pin_bytes());
+        if let Some(advert) = advertise(
+            "airdrop",
+            AIRDROP_SERVICE,
+            &instance[..12],
+            port,
+            vec![("flags".into(), MDNS_FLAGS.into())],
+        )
+        .await
+        {
+            println!(
+                "airdrop    {}  name \"{}\"  ({})",
+                advert.detail(),
+                config.name,
+                &instance[..12]
+            );
+            println!("airdrop    on the iPhone set AirDrop to Everyone for 10 minutes");
+            println!("airdrop    macOS AirDrop in System Settings is a different receiver");
+            adverts.push(advert);
         }
     }
 
+    println!("phones list this Mac only while their share sheet is open.");
     println!("waiting for files. press ctrl-c to stop.");
     cancel.cancelled().await;
     for advert in adverts {
@@ -227,6 +260,37 @@ pub fn interactive_approval() -> Approval {
         .unwrap_or_default();
         matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     })
+}
+
+async fn advertise(
+    label: &str,
+    service_type: &str,
+    instance: &str,
+    port: u16,
+    txt: Vec<(String, String)>,
+) -> Option<Advertisement> {
+    let service_type = service_type.to_string();
+    let instance = instance.to_string();
+    let label = label.to_string();
+    let joined = tokio::task::spawn_blocking(move || {
+        let pairs: Vec<(&str, &str)> = txt
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        Advertisement::start(&service_type, &instance, port, &pairs)
+    })
+    .await;
+    match joined {
+        Ok(Ok(advert)) => Some(advert),
+        Ok(Err(error)) => {
+            println!("{label} is not visible on the network: {error}");
+            None
+        }
+        Err(error) => {
+            println!("{label} is not visible on the network: {error}");
+            None
+        }
+    }
 }
 
 fn random_pin() -> String {

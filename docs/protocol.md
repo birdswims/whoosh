@@ -30,3 +30,5 @@ Up to four of those streams are active at once. Reads use 1 MiB buffers. The QUI
 The receiver writes `.<name>.partial`, checks the hash, then renames the file into place. A mismatch deletes the partial file.
 
 mDNS service type: `_whoosh._udp.local.` TXT keys are `n` (display name), `v` (`1`), and `fp` (fingerprint hex).
+
+On macOS the daemon registers through `dns-sd -includeAWDL`. AirDrop is a normal registration so the AWDL address stays in the answer. Quick Share and this native service are proxy records pinned to the private IPv4 chosen at startup, when one exists. Other operating systems advertise with userspace mDNS and pin that same address for Quick Share and native. AirDrop is never pinned to one IPv4 address: the iPhone connects to the AWDL address.
