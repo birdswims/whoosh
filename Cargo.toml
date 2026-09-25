@@ -1,0 +1,54 @@
+[package]
+name = "crossdrop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Cross-platform file, photo, and video transfer for macOS, Windows, and Linux, with Android Quick Share and Apple AirDrop interoperability"
+repository = "https://github.com/birdswims/crossdrop"
+readme = "README.md"
+keywords = ["airdrop", "quickshare", "file-transfer", "quic"]
+categories = ["command-line-utilities", "network-programming"]
+authors = ["birdswims"]
+
+[dependencies]
+aes = "0.8"
+anyhow = "1"
+base64 = "0.22"
+blake3 = "1"
+bytes = "1"
+cbc = { version = "0.1", features = ["alloc"] }
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+futures = "0.3"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+hostname = "0.4"
+if-addrs = "0.13"
+mdns-sd = { version = "0.13", features = ["async"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+plist = "1"
+prost = "0.13"
+quinn = "0.11"
+rand = "0.8"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
