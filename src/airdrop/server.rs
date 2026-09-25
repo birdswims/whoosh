@@ -168,7 +168,13 @@ impl AirdropReceiver {
         match request.path.as_str() {
             "/Discover" => match protocol::discover_response(&self.config.name, &self.config.model)
             {
-                Ok(body) => (200, "OK", "application/octet-stream", body),
+                Ok(body) => {
+                    println!(
+                        "airdrop    discover from a sender, answering as \"{}\"",
+                        self.config.name
+                    );
+                    (200, "OK", "application/octet-stream", body)
+                }
                 Err(error) => (
                     500,
                     "Server Error",

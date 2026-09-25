@@ -5,7 +5,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
-    server_acceptor, AirdropConfig, AirdropReceiver, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
+    macos_share_sheet_conflict, server_acceptor, AirdropConfig, AirdropReceiver, MDNS_FLAGS,
+    SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -167,6 +168,9 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?;
         let port = listener.local_addr()?.port();
         println!("airdrop    0.0.0.0:{port}  https");
+        if let Some(warning) = macos_share_sheet_conflict(&config.name) {
+            println!("airdrop    {warning}");
+        }
         let (acceptor, _) = server_acceptor()?;
         let airdrop = AirdropReceiver::new(AirdropConfig {
             dir: config.dir.clone(),
@@ -221,7 +225,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 &instance[..12]
             );
             println!("airdrop    on the iPhone set AirDrop to Everyone for 10 minutes");
-            println!("airdrop    macOS AirDrop in System Settings is a different receiver");
             adverts.push(advert);
         }
     }
