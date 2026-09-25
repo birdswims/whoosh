@@ -17,9 +17,20 @@ use crate::native::install_crypto;
 
 pub fn server_acceptor() -> Result<(TlsAcceptor, CertificateDer<'static>)> {
     install_crypto();
-    let key_pair = rcgen::KeyPair::generate().map_err(|error| Error::crypto(error.to_string()))?;
-    let params = rcgen::CertificateParams::new(vec!["AirDrop".into()])
+    // AirDrop clients still offer only RSA cipher suites. An ECDSA certificate
+    // makes the handshake fail with alert 40, and the iPhone then shows no row.
+    // rcgen's default expiry is year 4096, which does not fit in the 32-bit
+    // time some of those clients use.
+    let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)
         .map_err(|error| Error::crypto(error.to_string()))?;
+    let mut params = rcgen::CertificateParams::new(vec!["AirDrop".into()])
+        .map_err(|error| Error::crypto(error.to_string()))?;
+    params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "AirDrop");
     let cert = params
         .self_signed(&key_pair)
         .map_err(|error| Error::crypto(error.to_string()))?;
@@ -108,5 +119,25 @@ impl ServerCertVerifier for SignatureOnly {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_acceptor;
+
+    #[test]
+    fn certificate_is_rsa_and_expires_before_2038() {
+        let (_acceptor, cert) = server_acceptor().expect("acceptor");
+        let der = cert.as_ref();
+        const RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+        assert!(
+            der.windows(RSA_ENCRYPTION.len())
+                .any(|window| window == RSA_ENCRYPTION),
+            "AirDrop certificate is not RSA"
+        );
+        assert!(der.windows(13).any(|window| window == b"240101000000Z"));
+        assert!(der.windows(13).any(|window| window == b"350101000000Z"));
+        assert!(!der.windows(4).any(|window| window == b"4096"));
     }
 }

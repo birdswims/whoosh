@@ -5,8 +5,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
-    macos_share_sheet_conflict, server_acceptor, AirdropConfig, AirdropReceiver, MDNS_FLAGS,
-    SERVICE_TYPE as AIRDROP_SERVICE,
+    airdrop_visibility_line, macos_computer_name, server_acceptor, AirdropConfig, AirdropReceiver,
+    RestoredAirDropMode, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -67,6 +67,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     }
     println!("saving files to {}", config.dir.display());
     println!("{}", visibility_report());
+    let restore_airdrop = if config.airdrop {
+        RestoredAirDropMode::everyone_for_this_process()
+    } else {
+        None
+    };
 
     let mut tasks = Vec::new();
     let mut adverts = Vec::new();
@@ -168,9 +173,15 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?;
         let port = listener.local_addr()?.port();
         println!("airdrop    0.0.0.0:{port}  https");
-        if let Some(warning) = macos_share_sheet_conflict(&config.name) {
-            println!("airdrop    {warning}");
-        }
+        let computer = macos_computer_name().unwrap_or_else(|| "this Mac".into());
+        println!(
+            "airdrop    {}",
+            airdrop_visibility_line(
+                &config.name,
+                &computer,
+                restore_airdrop.as_ref().map(RestoredAirDropMode::previous),
+            )
+        );
         let (acceptor, _) = server_acceptor()?;
         let airdrop = AirdropReceiver::new(AirdropConfig {
             dir: config.dir.clone(),

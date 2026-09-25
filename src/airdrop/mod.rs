@@ -23,45 +23,112 @@ pub const SERVICE_TYPE: &str = "_airdrop._tcp.local.";
 /// `136` is `0x88`, the minimum OpenDrop found macOS will keep.
 pub const MDNS_FLAGS: &str = "136";
 
-/// Why an iPhone share sheet shows the Mac's computer name instead of `--name`.
+/// What to print about the iPhone share sheet.
 ///
-/// The row labeled with the computer name is macOS AirDrop (Bluetooth). Whoosh
-/// sends its own name only in the HTTPS Discover response, after a phone has
-/// already chosen a row. While macOS AirDrop is discoverable, that system row
-/// is the one the phone lists.
-pub fn share_sheet_conflict(whoosh_name: &str, mode: &str, computer_name: &str) -> Option<String> {
-    if !system_airdrop_visible(mode) {
-        return None;
+/// `switched_from` is set when Whoosh had to turn macOS AirDrop to Everyone
+/// because Contacts Only and Receiving Off never answer a phone that is not
+/// already a contact, so the sheet stays empty.
+pub fn airdrop_visibility_line(
+    whoosh_name: &str,
+    computer_name: &str,
+    switched_from: Option<&str>,
+) -> String {
+    let computer_name = if computer_name.trim().is_empty() {
+        "this Mac"
+    } else {
+        computer_name.trim()
+    };
+    match switched_from.map(str::trim).filter(|mode| !mode.is_empty()) {
+        Some(mode) => format!(
+            "macOS AirDrop was {mode}, so the iPhone showed no devices. It stays Everyone until you stop Whoosh, then {mode} is restored. On the iPhone set AirDrop to Everyone for 10 minutes. The system row is \"{computer_name}\" and saves into Downloads. Choose \"{whoosh_name}\" to save into this folder."
+        ),
+        None => format!(
+            "on the iPhone set AirDrop to Everyone for 10 minutes. The system row is \"{computer_name}\" and saves into Downloads. Choose \"{whoosh_name}\" to save into this folder."
+        ),
     }
-    let computer_name = computer_name.trim();
-    if computer_name.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "an iPhone lists \"{computer_name}\" from macOS AirDrop ({mode}), not \"{whoosh_name}\". That row is the system receiver and saves into Downloads. Set this Mac to Receiving Off under System Settings → General → AirDrop & Handoff, keep Whoosh running, and set the iPhone to Everyone for 10 minutes. The Whoosh row is \"{whoosh_name}\"."
-    ))
 }
 
-pub fn macos_share_sheet_conflict(whoosh_name: &str) -> Option<String> {
+pub fn macos_computer_name() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        let mode = command_line(
-            "defaults",
-            &["read", "com.apple.sharingd", "DiscoverableMode"],
-        )?;
-        let computer = command_line("scutil", &["--get", "ComputerName"])?;
-        return share_sheet_conflict(whoosh_name, mode.trim(), computer.trim());
+        return command_line("scutil", &["--get", "ComputerName"]);
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = whoosh_name;
         None
     }
 }
 
-fn system_airdrop_visible(mode: &str) -> bool {
-    let mode = mode.trim();
-    !mode.is_empty() && !mode.eq_ignore_ascii_case("off")
+/// Turns macOS AirDrop to Everyone for the life of this value, then restores
+/// the previous mode. Contacts Only and Receiving Off do not answer an iPhone
+/// that is not already a contact, so the share sheet stays empty.
+pub struct RestoredAirDropMode {
+    previous: String,
+}
+
+impl RestoredAirDropMode {
+    pub fn previous(&self) -> &str {
+        &self.previous
+    }
+
+    pub fn everyone_for_this_process() -> Option<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            let mode = command_line(
+                "defaults",
+                &["read", "com.apple.sharingd", "DiscoverableMode"],
+            )?;
+            let mode = mode.trim();
+            if mode.eq_ignore_ascii_case("everyone") {
+                return None;
+            }
+            let wrote = std::process::Command::new("defaults")
+                .args([
+                    "write",
+                    "com.apple.sharingd",
+                    "DiscoverableMode",
+                    "-string",
+                    "Everyone",
+                ])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !wrote {
+                return None;
+            }
+            // sharingd keeps the old mode in memory until it starts again.
+            let _ = std::process::Command::new("killall")
+                .arg("sharingd")
+                .status();
+            return Some(Self {
+                previous: mode.to_string(),
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+}
+
+impl Drop for RestoredAirDropMode {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("defaults")
+                .args([
+                    "write",
+                    "com.apple.sharingd",
+                    "DiscoverableMode",
+                    "-string",
+                    &self.previous,
+                ])
+                .status();
+            let _ = std::process::Command::new("killall")
+                .arg("sharingd")
+                .status();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -84,17 +151,19 @@ fn command_line(program: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::share_sheet_conflict;
+    use super::airdrop_visibility_line;
 
     #[test]
-    fn system_airdrop_hides_the_whoosh_name() {
-        let warning = share_sheet_conflict("Harry's Mac", "Everyone", "Hariom’s MacBook Pro")
-            .expect("visible mode");
-        assert!(warning.contains("Hariom’s MacBook Pro"));
-        assert!(warning.contains("Harry's Mac"));
-        assert!(warning.contains("Receiving Off"));
-        assert!(share_sheet_conflict("Harry's Mac", "Off", "Hariom’s MacBook Pro").is_none());
-        assert!(share_sheet_conflict("Harry's Mac", "  off ", "Hariom’s MacBook Pro").is_none());
-        assert!(share_sheet_conflict("Harry's Mac", "Contacts Only", "   ").is_none());
+    fn contacts_only_explains_the_empty_sheet() {
+        let line =
+            airdrop_visibility_line("Harry's Mac", "Hariom’s MacBook Pro", Some("Contacts Only"));
+        assert!(line.contains("showed no devices"));
+        assert!(line.contains("Contacts Only"));
+        assert!(line.contains("Harry's Mac"));
+        assert!(line.contains("Hariom’s MacBook Pro"));
+        assert!(!line.contains("Receiving Off"));
+        let already = airdrop_visibility_line("Harry's Mac", "Hariom’s MacBook Pro", None);
+        assert!(already.contains("Downloads"));
+        assert!(!already.contains("showed no devices"));
     }
 }
