@@ -31,4 +31,6 @@ The receiver writes `.<name>.partial`, checks the hash, then renames the file in
 
 mDNS service type: `_whoosh._udp.local.` TXT keys are `n` (display name), `v` (`1`), and `fp` (fingerprint hex).
 
-On macOS the daemon registers through `dns-sd -includeAWDL`. AirDrop is a normal registration so the AWDL address stays in the answer. Quick Share and this native service are proxy records pinned to the private IPv4 chosen at startup, when one exists. Other operating systems advertise with userspace mDNS and pin that same address for Quick Share and native. AirDrop is never pinned to one IPv4 address: the iPhone connects to the AWDL address.
+On macOS the daemon registers through `dns-sd -includeAWDL`. AirDrop is a normal registration so the AWDL address stays in the answer. Quick Share and this native service are proxy records pinned to the private IPv4 chosen at startup, when one exists. Other operating systems advertise with userspace mDNS and pin that same address for Quick Share and native. AirDrop is never pinned to one IPv4 address: a peer that speaks this older service connects to the AWDL address.
+
+The iPhone share sheet does not use this service. On current macOS the visible AirDrop row is `_companion-link._tcp`, instance name equal to the computer name, served by `rapportd`. That is a different protocol from Discover, Ask, and Upload.

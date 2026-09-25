@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
     airdrop_visibility_line, macos_computer_name, server_acceptor, AirdropConfig, AirdropReceiver,
-    RestoredAirDropMode, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
+    MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -67,11 +67,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     }
     println!("saving files to {}", config.dir.display());
     println!("{}", visibility_report());
-    let restore_airdrop = if config.airdrop {
-        RestoredAirDropMode::everyone_for_this_process()
-    } else {
-        None
-    };
 
     let mut tasks = Vec::new();
     let mut adverts = Vec::new();
@@ -176,11 +171,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let computer = macos_computer_name().unwrap_or_else(|| "this Mac".into());
         println!(
             "airdrop    {}",
-            airdrop_visibility_line(
-                &config.name,
-                &computer,
-                restore_airdrop.as_ref().map(RestoredAirDropMode::previous),
-            )
+            airdrop_visibility_line(&config.name, &computer)
         );
         let (acceptor, _) = server_acceptor()?;
         let airdrop = AirdropReceiver::new(AirdropConfig {
@@ -235,7 +226,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 config.name,
                 &instance[..12]
             );
-            println!("airdrop    on the iPhone set AirDrop to Everyone for 10 minutes");
             adverts.push(advert);
         }
     }
