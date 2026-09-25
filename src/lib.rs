@@ -1,4 +1,4 @@
-//! Crossdrop moves files, photos, and videos between macOS, Windows, and Linux.
+//! Whoosh moves files, photos, and videos between macOS, Windows, and Linux.
 //!
 //! The native protocol is QUIC. Android Quick Share and Apple AirDrop are
 //! separate sessions that speak those wire protocols.

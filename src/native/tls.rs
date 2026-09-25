@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
-pub const ALPN: &[u8] = b"crossdrop/1";
-pub const SERVER_NAME: &str = "crossdrop";
+pub const ALPN: &[u8] = b"whoosh/1";
+pub const SERVER_NAME: &str = "whoosh";
 
 pub struct IdentityCert {
     pub cert_der: CertificateDer<'static>,

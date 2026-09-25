@@ -1,6 +1,6 @@
 use std::io;
 
-/// Recoverable crossdrop failure.
+/// Recoverable whoosh failure.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]

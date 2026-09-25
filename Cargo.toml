@@ -1,11 +1,11 @@
 [package]
-name = "crossdrop"
+name = "whoosh"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
 description = "Cross-platform file, photo, and video transfer for macOS, Windows, and Linux, with Android Quick Share and Apple AirDrop interoperability"
-repository = "https://github.com/birdswims/crossdrop"
+repository = "https://github.com/birdswims/whoosh"
 readme = "README.md"
 keywords = ["airdrop", "quickshare", "file-transfer", "quic"]
 categories = ["command-line-utilities", "network-programming"]

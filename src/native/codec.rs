@@ -1,14 +1,14 @@
-//! Crossdrop native control messages.
+//! Whoosh native control messages.
 //!
 //! The client opens one bidirectional QUIC stream and writes the 8-byte magic
-//! `CROSDRP1`, then length-prefixed messages. The server writes length-prefixed
+//! `WHOOSH01`, then length-prefixed messages. The server writes length-prefixed
 //! messages on the same stream and does not repeat the magic. Each file is a
 //! unidirectional stream: `u32 file_id`, `u64 size`, `size` bytes, then 32-byte
 //! BLAKE3. Integers are little-endian.
 
 use crate::error::{Error, Result};
 
-pub const MAGIC: &[u8; 8] = b"CROSDRP1";
+pub const MAGIC: &[u8; 8] = b"WHOOSH01";
 pub const MAX_NAME: usize = 1024;
 pub const MAX_FILES: usize = 4096;
 pub const MAX_MIME: usize = 128;

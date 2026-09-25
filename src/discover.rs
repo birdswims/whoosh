@@ -112,14 +112,14 @@ fn mdns_hostname() -> String {
     let raw = hostname::get()
         .ok()
         .and_then(|value| value.into_string().ok())
-        .unwrap_or_else(|| "crossdrop".into());
+        .unwrap_or_else(|| "whoosh".into());
     let mut label: String = raw
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
         .take(40)
         .collect();
     if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
-        label = "crossdrop".into();
+        label = "whoosh".into();
     }
     format!("{label}.local.")
 }
@@ -129,5 +129,5 @@ pub fn device_name() -> String {
         .ok()
         .and_then(|value| value.into_string().ok())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Crossdrop".into())
+        .unwrap_or_else(|| "Whoosh".into())
 }

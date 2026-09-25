@@ -361,43 +361,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossdrop"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "base64 0.22.1",
- "blake3",
- "bytes",
- "cbc",
- "clap",
- "flate2",
- "futures",
- "hex",
- "hkdf",
- "hmac",
- "hostname",
- "if-addrs",
- "libc",
- "mdns-sd",
- "p256",
- "plist",
- "prost",
- "quinn",
- "rand 0.8.8",
- "rcgen",
- "rustls",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1997,6 +1960,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "whoosh"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "cbc",
+ "clap",
+ "flate2",
+ "futures",
+ "hex",
+ "hkdf",
+ "hmac",
+ "hostname",
+ "if-addrs",
+ "libc",
+ "mdns-sd",
+ "p256",
+ "plist",
+ "prost",
+ "quinn",
+ "rand 0.8.8",
+ "rcgen",
+ "rustls",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

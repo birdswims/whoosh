@@ -13,7 +13,7 @@ use crate::service::{run, DaemonConfig};
 
 #[derive(Parser)]
 #[command(
-    name = "crossdrop",
+    name = "whoosh",
     version,
     about = "Send files, photos, and videos between macOS, Windows, and Linux",
     arg_required_else_help = true
@@ -25,9 +25,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Receive with Crossdrop, Android Quick Share, and Apple AirDrop.
+    /// Receive with Whoosh, Android Quick Share, and Apple AirDrop.
     Receive {
-        #[arg(long, default_value = "Crossdrop")]
+        #[arg(long, default_value = "Whoosh")]
         dir: PathBuf,
         #[arg(long)]
         name: Option<String>,
@@ -50,7 +50,7 @@ enum Command {
         #[arg(long, default_value_t = 8192)]
         max_mib: u64,
     },
-    /// Send to another Crossdrop app over QUIC.
+    /// Send to another Whoosh app over QUIC.
     Send {
         /// `host:port` or a discovered device name.
         #[arg(long)]
@@ -80,7 +80,7 @@ enum Command {
         #[arg(long)]
         http: bool,
     },
-    /// List Crossdrop, Quick Share, and AirDrop devices for a few seconds.
+    /// List Whoosh, Quick Share, and AirDrop devices for a few seconds.
     Discover {
         #[arg(long, default_value_t = 3)]
         seconds: u64,
@@ -158,7 +158,7 @@ pub async fn execute() -> Result<()> {
         }
         Command::Discover { seconds } => {
             let wait = Duration::from_secs(seconds);
-            println!("crossdrop");
+            println!("whoosh");
             for peer in discover::browse(native::SERVICE_TYPE, wait).await? {
                 let name = peer.txt.get("n").cloned().unwrap_or(peer.instance);
                 println!(
@@ -224,7 +224,7 @@ fn peers_path() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .ok_or_else(|| Error::protocol("home directory is not set"))?;
-    let dir = home.join(".config").join("crossdrop");
+    let dir = home.join(".config").join("whoosh");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("known-peers"))
 }
@@ -268,9 +268,9 @@ mod tests {
 
     #[test]
     fn receive_and_send_parse() {
-        assert!(Cli::try_parse_from(["crossdrop", "receive", "--yes", "--require-pin"]).is_ok());
+        assert!(Cli::try_parse_from(["whoosh", "receive", "--yes", "--require-pin"]).is_ok());
         assert!(Cli::try_parse_from([
-            "crossdrop",
+            "whoosh",
             "send",
             "--to",
             "127.0.0.1:9",
@@ -278,6 +278,6 @@ mod tests {
             "a.jpg"
         ])
         .is_ok());
-        assert!(Cli::try_parse_from(["crossdrop", "discover"]).is_ok());
+        assert!(Cli::try_parse_from(["whoosh", "discover"]).is_ok());
     }
 }

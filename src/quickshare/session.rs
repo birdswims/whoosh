@@ -37,7 +37,7 @@ impl QuickshareConfig {
     pub fn auto(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
-            name: "Crossdrop".into(),
+            name: "Whoosh".into(),
             sort_media: false,
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),

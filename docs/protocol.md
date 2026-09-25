@@ -1,10 +1,10 @@
 # Native protocol
 
-Crossdrop peers use QUIC with ALPN `crossdrop/1` and the TLS server name `crossdrop`. The certificate is self-signed. Callers pin its SHA-256 fingerprint.
+Whoosh peers use QUIC with ALPN `whoosh/1` and the TLS server name `whoosh`. The certificate is self-signed. Callers pin its SHA-256 fingerprint.
 
 The client opens one bidirectional stream and writes:
 
-1. The 8 bytes `CROSDRP1`.
+1. The 8 bytes `WHOOSH01`.
 2. Length-prefixed control messages. The length is a little-endian `u32` and does not include itself.
 
 The server writes length-prefixed control messages on that stream and does not repeat the magic.
@@ -29,4 +29,4 @@ Up to four of those streams are active at once. Reads use 1 MiB buffers. The QUI
 
 The receiver writes `.<name>.partial`, checks the hash, then renames the file into place. A mismatch deletes the partial file.
 
-mDNS service type: `_crossdrop._udp.local.` TXT keys are `n` (display name), `v` (`1`), and `fp` (fingerprint hex).
+mDNS service type: `_whoosh._udp.local.` TXT keys are `n` (display name), `v` (`1`), and `fp` (fingerprint hex).

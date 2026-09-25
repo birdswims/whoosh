@@ -165,7 +165,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let airdrop = AirdropReceiver::new(AirdropConfig {
             dir: config.dir.clone(),
             name: config.name.clone(),
-            model: "Crossdrop".into(),
+            model: "Whoosh".into(),
             sort_media: config.sort_media,
             max_file_bytes: config.max_file_bytes,
             approve: config.approve.clone(),

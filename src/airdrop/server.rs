@@ -29,8 +29,8 @@ impl AirdropConfig {
     pub fn auto(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
-            name: "Crossdrop".into(),
-            model: "Crossdrop".into(),
+            name: "Whoosh".into(),
+            model: "Whoosh".into(),
             sort_media: false,
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),
@@ -337,7 +337,7 @@ pub async fn send_tls(
             (name.clone(), mime)
         })
         .collect();
-    let ask = protocol::ask_request(sender_name, "crossdrop", &described)?;
+    let ask = protocol::ask_request(sender_name, "whoosh", &described)?;
     let response = post(&mut socket, "/Ask", "application/octet-stream", &ask).await?;
     if response.status != 200 {
         return Err(Error::Rejected(format!("ask status {}", response.status)));
@@ -373,7 +373,7 @@ pub async fn send_plain(
             (name.clone(), mime)
         })
         .collect();
-    let ask = protocol::ask_request(sender_name, "crossdrop", &described)?;
+    let ask = protocol::ask_request(sender_name, "whoosh", &described)?;
     let response = post(&mut socket, "/Ask", "application/octet-stream", &ask).await?;
     if response.status != 200 {
         return Err(Error::Rejected(format!("ask status {}", response.status)));
@@ -398,7 +398,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: crossdrop\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: whoosh\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
         body.len()
     );
     io.write_all(head.as_bytes()).await?;

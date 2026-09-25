@@ -99,7 +99,7 @@ pub fn ask_request(
         Value::String(sender_name.into()),
     );
     root.insert("BundleID".into(), Value::String("com.apple.finder".into()));
-    root.insert("SenderModelName".into(), Value::String("Crossdrop".into()));
+    root.insert("SenderModelName".into(), Value::String("Whoosh".into()));
     root.insert("SenderID".into(), Value::String(sender_id.into()));
     root.insert("ConvertMediaFormats".into(), Value::Boolean(false));
     let entries = files
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn discover_and_ask_plists_roundtrip() {
-        let body = discover_response("Harry", "Crossdrop").unwrap();
+        let body = discover_response("Harry", "Whoosh").unwrap();
         assert!(body.starts_with(b"bplist"));
         let ask = ask_request(
             "iPhone",
@@ -168,7 +168,7 @@ mod tests {
         let parsed = parse_ask(&ask).unwrap();
         assert_eq!(parsed.sender_name, "iPhone");
         assert_eq!(parsed.files[0].name, "photo.jpg");
-        assert!(ask_response("Harry", "Crossdrop")
+        assert!(ask_response("Harry", "Whoosh")
             .unwrap()
             .starts_with(b"bplist"));
     }

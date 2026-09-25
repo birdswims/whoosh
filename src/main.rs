@@ -8,7 +8,7 @@ async fn main() {
         )
         .with_target(false)
         .init();
-    if let Err(error) = crossdrop::cli::execute().await {
+    if let Err(error) = whoosh::cli::execute().await {
         eprintln!("error: {error}");
         std::process::exit(1);
     }

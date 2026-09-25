@@ -259,7 +259,7 @@ async fn handle_receive(
     let mut magic = [0u8; 8];
     error::read_exact(&mut recv, &mut magic).await?;
     if &magic != MAGIC {
-        return Err(Error::protocol("not a crossdrop peer"));
+        return Err(Error::protocol("not a whoosh peer"));
     }
     let peer = match read_control(&mut recv).await? {
         Control::Hello(hello) => hello,
@@ -322,7 +322,7 @@ async fn handle_receive(
     let decision = timeout(
         DECISION_TIMEOUT,
         (options.approve)(TransferOffer {
-            protocol: "crossdrop",
+            protocol: "whoosh",
             peer: peer.name.clone(),
             pin: pin.map(str::to_string),
             files: incoming,

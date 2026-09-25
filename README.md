@@ -1,10 +1,10 @@
-# Crossdrop
+# Whoosh
 
-Crossdrop sends files, photos, and videos between macOS, Windows, and Linux. Computers running Crossdrop talk to each other over QUIC. The same receiver also speaks Android Quick Share on the local Wi-Fi network and Apple AirDrop's Discover, Ask, and Upload calls.
+Whoosh sends files, photos, and videos between macOS, Windows, and Linux. Computers running Whoosh talk to each other over QUIC. The same receiver also speaks Android Quick Share on the local Wi-Fi network and Apple AirDrop's Discover, Ask, and Upload calls.
 
 ```text
-crossdrop receive --name "Harry's Mac"
-crossdrop send --to 192.168.1.20:45823 --trust-first photo.jpg clip.mp4
+whoosh receive --name "Harry's Mac"
+whoosh send --to 192.168.1.20:45823 --trust-first photo.jpg clip.mp4
 ```
 
 ## Install
@@ -13,7 +13,7 @@ Install a stable Rust toolchain, then:
 
 ```bash
 cargo install --path .
-crossdrop --help
+whoosh --help
 ```
 
 `cargo test --all-targets` runs the suite. Continuous integration runs that on Linux, macOS, and Windows.
@@ -21,7 +21,7 @@ crossdrop --help
 ## Receive
 
 ```bash
-crossdrop receive --dir ~/Crossdrop --name "Harry's Mac"
+whoosh receive --dir ~/Whoosh --name "Harry's Mac"
 ```
 
 This listens for all three protocols until you press Ctrl-C.
@@ -34,21 +34,21 @@ This listens for all three protocols until you press Ctrl-C.
 | `--no-native`, `--no-quickshare`, `--no-airdrop` | Turn one listener off |
 | `--max-mib` | Largest accepted file, default 8192 MiB |
 
-A native sender must pass `--trust-first` the first time, after comparing the fingerprint printed by the receiver. Later sends to that address use the saved fingerprint in `~/.config/crossdrop/known-peers`.
+A native sender must pass `--trust-first` the first time, after comparing the fingerprint printed by the receiver. Later sends to that address use the saved fingerprint in `~/.config/whoosh/known-peers`.
 
 ## Send
 
 ```bash
-# Another Crossdrop receiver. QUIC, streamed, parallel files.
-crossdrop send --to 127.0.0.1:45823 --pin 1234 --trust-first a.jpg b.mp4
+# Another Whoosh receiver. QUIC, streamed, parallel files.
+whoosh send --to 127.0.0.1:45823 --pin 1234 --trust-first a.jpg b.mp4
 
 # Android Quick Share receiver on the same Wi-Fi.
-crossdrop quickshare --to 192.168.1.30:12345 vacation.mp4
+whoosh quickshare --to 192.168.1.30:12345 vacation.mp4
 
 # AirDrop receiver. HTTPS. Add --http only for a lab listener.
-crossdrop airdrop --to 192.168.1.40:8770 photo.jpg
+whoosh airdrop --to 192.168.1.40:8770 photo.jpg
 
-crossdrop discover --seconds 5
+whoosh discover --seconds 5
 ```
 
 `host:port` skips discovery. A bare name is looked up over mDNS for about three seconds.
@@ -62,7 +62,7 @@ The native path is the one built for speed:
 - 1 MiB reads and BLAKE3 computed while the file is read
 - files land in `.<name>.partial` and are renamed after the hash matches
 
-Quick Share and AirDrop are single TCP sessions with their own framing. Use them to reach a phone. Use native Crossdrop between computers.
+Quick Share and AirDrop are single TCP sessions with their own framing. Use them to reach a phone. Use native Whoosh between computers.
 
 The wire format is in [docs/protocol.md](docs/protocol.md).
 
@@ -70,11 +70,11 @@ The wire format is in [docs/protocol.md](docs/protocol.md).
 
 | Peer | What works | What does not |
 | --- | --- | --- |
-| Another Crossdrop on macOS, Windows, or Linux | QUIC send and receive on the LAN | A public relay. This is a local transfer. |
+| Another Whoosh on macOS, Windows, or Linux | QUIC send and receive on the LAN | A public relay. This is a local transfer. |
 | Android Quick Share | Same-Wi-Fi receive and send. mDNS type `_FC9F5ED42C8A._tcp`. UKEY2, then encrypted file frames. Open the Quick Share sheet on the phone. | Wi-Fi Direct, and the BLE wake packet from macOS. macOS does not allow the service data Android looks for. The packet builder is in the library for a stack that can send it. |
 | Apple AirDrop | Discover, Ask, and Upload over HTTPS, plus `_airdrop._tcp`. On macOS the receiver also binds `awdl0` when that interface exists. | Contacts-only mode. It needs an Apple-signed identity, which is not in this project. Windows and Linux do not have AWDL, so an iPhone usually cannot see them as AirDrop targets. |
 
-Quick Share's four-digit code is derived from the UKEY2 authentication string. Compare it on both screens before accepting. AirDrop Everyone mode is a ten-minute choice on the Apple device. The Crossdrop receiver still asks before it writes.
+Quick Share's four-digit code is derived from the UKEY2 authentication string. Compare it on both screens before accepting. AirDrop Everyone mode is a ten-minute choice on the Apple device. The Whoosh receiver still asks before it writes.
 
 File names are one path component. `..`, slashes, and Windows device names are rejected. A failed transfer deletes its partial file.
 
