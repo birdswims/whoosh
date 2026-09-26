@@ -1,9 +1,8 @@
-//! Bluetooth LE wake packet that makes Android publish Quick Share on mDNS.
+//! Bluetooth LE wake packet that makes Android look for Quick Share on mDNS.
 //!
 //! The 16-bit service UUID is `0xFE2C`. The service data prefix is fixed;
-//! the last 10 bytes are random. macOS does not let ordinary apps set that
-//! service data, so the daemon advertises over mDNS directly and this packet
-//! is available for a platform that can send it.
+//! the last 10 bytes are random. CoreBluetooth cannot attach this service
+//! data, so on macOS the daemon sends the bytes through IOBluetooth.
 
 pub const SERVICE_UUID: u16 = 0xFE2C;
 const PREFIX: [u8; 14] = [

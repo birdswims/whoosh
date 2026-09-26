@@ -23,12 +23,7 @@ pub const SERVICE_TYPE: &str = "_airdrop._tcp.local.";
 /// `136` is `0x88`, the minimum OpenDrop found macOS will keep.
 pub const MDNS_FLAGS: &str = "136";
 
-/// What to print about the iPhone share sheet.
-///
-/// The name on that sheet is the macOS Companion Link advert
-/// (`_companion-link._tcp`), whose instance name is the computer name.
-/// Whoosh advertises the older `_airdrop._tcp` Discover/Ask/Upload service.
-/// Current iOS does not add that service as its own row.
+/// What to print about the phone share sheets.
 pub fn airdrop_visibility_line(whoosh_name: &str, computer_name: &str) -> String {
     let computer_name = if computer_name.trim().is_empty() {
         "this Mac"
@@ -36,7 +31,7 @@ pub fn airdrop_visibility_line(whoosh_name: &str, computer_name: &str) -> String
         computer_name.trim()
     };
     format!(
-        "an iPhone lists \"{computer_name}\" from macOS Companion Link, not \"{whoosh_name}\". That row is rapportd and saves into Downloads. Whoosh speaks the older AirDrop service `_airdrop._tcp`. Current iOS does not show that service in the share sheet."
+        "look for \"{whoosh_name}\" on the phone. Quick Share must be open and set to Everyone on this Wi-Fi. AirDrop on the iPhone must be Everyone for 10 minutes. \"{computer_name}\" is macOS AirDrop and saves into Downloads."
     )
 }
 
@@ -76,10 +71,9 @@ mod tests {
     #[test]
     fn iphone_sheet_is_companion_link_not_whoosh() {
         let line = airdrop_visibility_line("Harry's Mac", "Hariom’s MacBook Pro");
-        assert!(line.contains("Companion Link"));
-        assert!(line.contains("_airdrop._tcp"));
         assert!(line.contains("Harry's Mac"));
         assert!(line.contains("Hariom’s MacBook Pro"));
         assert!(line.contains("Downloads"));
+        assert!(line.contains("Everyone"));
     }
 }

@@ -19,6 +19,7 @@ use crate::quickshare::{
     random_endpoint_id, serve as serve_quickshare, service_instance_name, EndpointInfo,
     QuickshareConfig, DEVICE_LAPTOP, SERVICE_TYPE as QUICKSHARE_SERVICE,
 };
+use crate::radio::Radio;
 
 pub struct DaemonConfig {
     pub name: String,
@@ -67,6 +68,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     }
     println!("saving files to {}", config.dir.display());
     println!("{}", visibility_report());
+    let _radio = (config.quickshare || config.airdrop).then(|| Radio::start(config.name.clone()));
 
     let mut tasks = Vec::new();
     let mut adverts = Vec::new();

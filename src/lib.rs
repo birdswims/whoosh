@@ -14,6 +14,8 @@ pub mod native;
 pub mod net;
 pub mod paths;
 pub mod quickshare;
+#[allow(unsafe_code)]
+pub mod radio;
 pub mod sanitize;
 pub mod service;
 
