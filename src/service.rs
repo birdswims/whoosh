@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
     airdrop_visibility_line, macos_computer_name, server_acceptor, AirdropConfig, AirdropReceiver,
-    ALT_SERVICE_TYPE, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
+    MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::native::{
     fingerprint_hex, NativeListener, ReceiveOptions, SERVICE_TYPE as NATIVE_SERVICE,
 };
-use crate::net::{awdl_listeners, visibility_report};
+use crate::net::{awdl_listeners, bind_airdrop_listener, visibility_report};
 use crate::quickshare::{
     random_endpoint_id, serve as serve_quickshare, service_instance_name, EndpointInfo,
     QuickshareConfig, DEVICE_LAPTOP, SERVICE_TYPE as QUICKSHARE_SERVICE,
@@ -169,7 +169,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     }
 
     if config.airdrop {
-        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?;
+        let listener = bind_airdrop_listener(SocketAddr::from(([0, 0, 0, 0], 0)))?;
         let port = listener.local_addr()?.port();
         println!("airdrop    0.0.0.0:{port}  https");
         let computer = macos_computer_name().unwrap_or_else(|| "this Mac".into());
@@ -199,9 +199,9 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             println!("airdrop    awdl0 has no IPv6 address, so an iPhone cannot connect");
         }
         for addr in awdl {
-            match TcpListener::bind(addr).await {
+            match bind_airdrop_listener(addr) {
                 Ok(extra) => {
-                    println!("airdrop    {addr}  awdl");
+                    println!("airdrop    {addr}  awdl (inbound traffic enabled)");
                     let receiver = airdrop.clone();
                     let acceptor = acceptor.clone();
                     let cancel = cancel.clone();
@@ -214,34 +214,19 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 }
             }
         }
+        // AirDrop learns the display name from /Discover. Publishing extra
+        // instances or an alternate browse type produces duplicate picker rows.
         let instance = hex::encode(&pin_bytes());
         let flags = vec![("flags".into(), MDNS_FLAGS.into())];
-        if let Some(advert) = advertise(
-            "airdrop",
-            AIRDROP_SERVICE,
-            &instance[..12],
-            port,
-            flags.clone(),
-        )
-        .await
+        if let Some(advert) =
+            advertise("airdrop", AIRDROP_SERVICE, &instance[..12], port, flags).await
         {
             println!(
-                "airdrop    {}  legacy {}  ({})",
+                "airdrop    {}  name \"{}\"  ({})",
                 advert.detail(),
                 config.name,
                 &instance[..12]
             );
-            adverts.push(advert);
-        }
-        let alt_name = airdrop_instance_name(&config.name);
-        if let Some(advert) =
-            advertise("airdrop", AIRDROP_SERVICE, &alt_name, port, flags.clone()).await
-        {
-            println!("airdrop    {}  name \"{alt_name}\"", advert.detail());
-            adverts.push(advert);
-        }
-        if let Some(advert) = advertise("airdrop", ALT_SERVICE_TYPE, &alt_name, port, flags).await {
-            println!("airdrop    {}  alt \"{alt_name}\"", advert.detail());
             adverts.push(advert);
         }
     }
@@ -310,28 +295,6 @@ async fn advertise(
             println!("{label} is not visible on the network: {error}");
             None
         }
-    }
-}
-
-fn airdrop_instance_name(name: &str) -> String {
-    let mut out = String::new();
-    for ch in name.chars() {
-        if out.len() >= 63 {
-            break;
-        }
-        if ch.is_control() {
-            continue;
-        }
-        let next = ch.len_utf8();
-        if out.len() + next > 63 {
-            break;
-        }
-        out.push(ch);
-    }
-    if out.is_empty() {
-        "Whoosh".into()
-    } else {
-        out
     }
 }
 

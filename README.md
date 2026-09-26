@@ -26,6 +26,8 @@ whoosh receive --dir ~/Whoosh --name "Harry's Mac"
 
 This listens for all three protocols until you press Ctrl-C. On macOS it registers them with the system mDNS responder. Quick Share is announced on the LAN interface. An Android phone can list it while the Quick Share sheet is open, on that same Wi-Fi, set to Everyone. The iPhone share sheet does not list this service.
 
+For AirDrop, Whoosh needs both Bonjour registration and a reachable HTTPS listener on Apple's AWDL interface. On macOS the listener enables `SO_RECV_ANYIF` before binding; an ordinary TCP listener can bind to `awdl0` while still filtering incoming AWDL traffic. Startup prints `awdl (inbound traffic enabled)` when that listener is ready. When an Apple sender probes it, the terminal prints `discover from a sender, answering as "Harry's Mac"`. Whoosh publishes one AirDrop instance; the picker gets `--name` from that response. Stop older Whoosh receivers before starting a rebuilt version to avoid duplicate advertisements. The entry with the Mac's system computer name belongs to macOS and does not send files to Whoosh's directory.
+
 | Flag | Effect |
 | --- | --- |
 | `--yes` | Accept transfers without a prompt |

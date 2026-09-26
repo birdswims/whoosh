@@ -44,7 +44,7 @@ pub fn airdrop_visibility_line(whoosh_name: &str, computer_name: &str) -> String
         computer_name.trim()
     };
     format!(
-        "look for a separate row \"{whoosh_name}\". \"{computer_name}\" stays the macOS AirDrop name and saves into Downloads. AirDrop on the iPhone must be Everyone for 10 minutes. Quick Share must be open and set to Everyone on this Wi-Fi."
+        "advertising as \"{whoosh_name}\". Open the iPhone's AirDrop picker; a Discover request in this terminal confirms it reached Whoosh. \"{computer_name}\" stays the macOS AirDrop name and saves into Downloads."
     )
 }
 
@@ -111,13 +111,13 @@ mod tests {
     }
 
     #[test]
-    fn iphone_keeps_the_mac_name_and_lists_whoosh() {
+    fn visibility_distinguishes_advertisement_from_phone_discovery() {
         let line = airdrop_visibility_line("Harry's Mac", "Hariom’s MacBook Pro");
-        assert!(line.contains("separate row \"Harry's Mac\""));
+        assert!(line.contains("advertising as \"Harry's Mac\""));
         assert!(line.contains("Hariom’s MacBook Pro"));
         assert!(line.contains("stays the macOS AirDrop name"));
         assert!(line.contains("Downloads"));
-        assert!(line.contains("Everyone"));
+        assert!(line.contains("Discover request"));
     }
 
     #[test]

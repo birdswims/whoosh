@@ -1,7 +1,54 @@
 //! Extra listeners for interfaces the operating system keeps off the default route,
 //! and the LAN address a phone can actually open.
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV6};
+#[cfg(target_os = "macos")]
+use std::net::SocketAddrV6;
+use std::net::{Ipv4Addr, SocketAddr};
+
+/// Bind an AirDrop listener with inbound AWDL traffic enabled on macOS.
+/// Binding to an awdl0 address alone does not opt into restricted interfaces.
+pub fn bind_airdrop_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let socket = if addr.is_ipv6() {
+        tokio::net::TcpSocket::new_v6()?
+    } else {
+        tokio::net::TcpSocket::new_v4()?
+    };
+    #[cfg(target_os = "macos")]
+    allow_awdl_receive(&socket)?;
+    socket.bind(addr)?;
+    socket.listen(128)
+}
+
+// Defined in XNU's bsd/sys/socket_private.h, absent from the public SDK/libc.
+// https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/socket_private.h
+#[cfg(target_os = "macos")]
+const SO_RECV_ANYIF: libc::c_int = 0x1104;
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn allow_awdl_receive(socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let enabled: libc::c_int = 1;
+    // SAFETY: socket owns a valid descriptor and enabled is a live c_int whose
+    // size matches optlen. setsockopt copies the value before returning.
+    let status = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            SO_RECV_ANYIF,
+            (&enabled as *const libc::c_int).cast(),
+            std::mem::size_of_val(&enabled) as libc::socklen_t,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::other(format!(
+            "cannot enable AirDrop AWDL reception (SO_RECV_ANYIF): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceV4 {
@@ -273,6 +320,49 @@ mod tests {
         LanAddress,
     };
     use std::net::Ipv4Addr;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[allow(unsafe_code)]
+    async fn airdrop_listener_and_accepted_socket_allow_awdl() {
+        use std::os::fd::AsRawFd;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn recv_anyif(socket: &impl AsRawFd) -> libc::c_int {
+            let mut value: libc::c_int = 0;
+            let mut len = std::mem::size_of_val(&value) as libc::socklen_t;
+            // SAFETY: valid socket and writable c_int/socklen_t buffers.
+            let result = unsafe {
+                libc::getsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    super::SO_RECV_ANYIF,
+                    (&mut value as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            };
+            assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+            value
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for addr in ["127.0.0.1:0", "[::1]:0"] {
+                let listener = super::bind_airdrop_listener(addr.parse().unwrap()).unwrap();
+                assert_eq!(recv_anyif(&listener), 1);
+                let mut sender = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+                    .await
+                    .unwrap();
+                let (mut receiver, _) = listener.accept().await.unwrap();
+                assert_eq!(recv_anyif(&receiver), 1);
+                sender.write_all(b"AWDL").await.unwrap();
+                let mut received = [0u8; 4];
+                receiver.read_exact(&mut received).await.unwrap();
+                assert_eq!(&received, b"AWDL");
+            }
+        })
+        .await
+        .expect("AirDrop listener stalled");
+    }
 
     fn iface(name: &str, ip: [u8; 4]) -> InterfaceV4 {
         InterfaceV4 {

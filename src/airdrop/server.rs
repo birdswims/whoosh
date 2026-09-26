@@ -69,16 +69,19 @@ impl AirdropReceiver {
                     let this = self.clone();
                     let acceptor = acceptor.clone();
                     tokio::spawn(async move {
-                        match acceptor.accept(socket).await {
-                            Ok(tls) => {
-                                println!("airdrop    {peer}  discover");
-                                let _ = this.connection(tls).await;
+                        match timeout(Duration::from_secs(15), acceptor.accept(socket)).await {
+                            Ok(Ok(tls)) => {
+                                println!("airdrop    {peer}  HTTPS connected");
+                                if let Err(error) = this.connection(tls).await {
+                                    tracing::warn!(%peer, %error, "AirDrop HTTPS session failed");
+                                }
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 println!(
                                     "airdrop    {peer}  connected, then did not speak AirDrop HTTPS ({error})"
                                 );
                             }
+                            Err(_) => println!("airdrop    {peer}  TLS handshake timed out"),
                         }
                     });
                 }
@@ -487,6 +490,59 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("tls.jpg")).unwrap(),
             vec![0xFF, 0xD8, 0xFF]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovers_named_receiver_over_ipv6_https() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = crate::net::bind_airdrop_listener("[::1]:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AirdropConfig::auto(dir.path());
+        config.name = "Harry's Mac".into();
+        let receiver = AirdropReceiver::new(config);
+        let (acceptor, cert) = crate::airdrop::server_acceptor().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(receiver.serve_tls(listener, acceptor, cancel.clone()));
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut socket = crate::airdrop::client_connector(cert)
+                .unwrap()
+                .connect(crate::airdrop::server_name(), socket)
+                .await
+                .unwrap();
+            let body = super::protocol::discover_request().unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "POST /Discover HTTP/1.1\r\nHost: AirDrop\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.flush().await.unwrap();
+            let response = super::http::read_request(&mut socket, 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(response.path, "200");
+            socket.shutdown().await.unwrap();
+            // Consume the server's TLS close so the session has ended.
+            let mut remaining = Vec::new();
+            let _ = socket.read_to_end(&mut remaining).await;
+            response.body
+        })
+        .await;
+        cancel.cancel();
+        server.await.unwrap().unwrap();
+        let value = plist::Value::from_reader(std::io::Cursor::new(body.unwrap())).unwrap();
+        assert_eq!(
+            value.as_dictionary().unwrap()["ReceiverComputerName"].as_string(),
+            Some("Harry's Mac")
         );
     }
 
