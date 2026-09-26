@@ -18,10 +18,15 @@ pub use server::{send_plain, send_tls, AirdropConfig, AirdropReceiver};
 
 pub const SERVICE_TYPE: &str = "_airdrop._tcp.local.";
 
+/// Second AirDrop browse type compiled into Sharing.framework
+/// (`_kBonjourTypeAirDropAlt`). The system receiver itself is advertised as
+/// `_companion-link._tcp`, not as `_airdrop._tcp`.
+pub const ALT_SERVICE_TYPE: &str = "_airdrop-alt._tcp.local.";
+
 /// mDNS TXT `flags`. Apple ignores a receiver that sets neither mixed-types
 /// (`0x08`) nor pipelining (`0x04`). `0x80` marks support for `/Discover`.
-/// `136` is `0x88`, the minimum OpenDrop found macOS will keep.
-pub const MDNS_FLAGS: &str = "136";
+/// `140` is `0x8C`: discover, mixed types, and pipelining.
+pub const MDNS_FLAGS: &str = "140";
 
 /// What to print about the phone share sheets.
 pub fn airdrop_visibility_line(whoosh_name: &str, computer_name: &str) -> String {

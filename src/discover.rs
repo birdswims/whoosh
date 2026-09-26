@@ -162,7 +162,7 @@ pub fn registration_confirmed(output: &str) -> bool {
 }
 
 fn keeps_interface_addresses(service_type: &str) -> bool {
-    service_type.contains("_airdrop._tcp")
+    service_type.contains("_airdrop")
 }
 
 fn dns_sd_type(service_type: &str) -> Result<String> {
@@ -452,6 +452,22 @@ mod tests {
                 "flags=136",
             ]
         );
+        assert!(!plan.args.iter().any(|arg| arg == "-i"));
+    }
+
+    #[test]
+    fn airdrop_alt_is_registered_on_awdl() {
+        let plan = dns_sd_plan(
+            "_airdrop-alt._tcp.local.",
+            "Harry's Mac",
+            9,
+            &[("flags", "140")],
+            Some(("en0", Ipv4Addr::new(192, 168, 1, 11))),
+        )
+        .unwrap();
+        assert!(plan.args.iter().any(|arg| arg == "-includeAWDL"));
+        assert!(plan.args.iter().any(|arg| arg == "_airdrop-alt._tcp"));
+        assert!(plan.args.iter().any(|arg| arg == "Harry's Mac"));
         assert!(!plan.args.iter().any(|arg| arg == "-i"));
     }
 

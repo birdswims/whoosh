@@ -33,4 +33,4 @@ mDNS service type: `_whoosh._udp.local.` TXT keys are `n` (display name), `v` (`
 
 On macOS the daemon registers through `dns-sd`. AirDrop uses `-includeAWDL` so the AWDL address stays in the answer. Quick Share and the native service are registered on the LAN interface only, so a phone is not offered a tunnel address or a proxy hostname. Other operating systems advertise with userspace mDNS and pin that same address for Quick Share and native.
 
-The iPhone share sheet does not use this service. On current macOS the visible AirDrop row is `_companion-link._tcp`, instance name equal to the computer name, served by `rapportd`. That is a different protocol from Discover, Ask, and Upload.
+On this Mac, with AirDrop set to Everyone, `sharingd` does not register `_airdrop._tcp` and does not listen on port 8770. The row an iPhone shows is `_companion-link._tcp`, instance name equal to the computer name, served by `rapportd`. Sharing.framework also has `_airdrop-alt._tcp` (`_kBonjourTypeAirDropAlt`). Whoosh registers both AirDrop browse types. The Discover response name is the `--name` value.

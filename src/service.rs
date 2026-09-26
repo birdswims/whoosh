@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
     airdrop_visibility_line, macos_computer_name, server_acceptor, AirdropConfig, AirdropReceiver,
-    MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
+    ALT_SERVICE_TYPE, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -215,21 +215,27 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             }
         }
         let instance = hex::encode(&pin_bytes());
+        let flags = vec![("flags".into(), MDNS_FLAGS.into())];
         if let Some(advert) = advertise(
             "airdrop",
             AIRDROP_SERVICE,
             &instance[..12],
             port,
-            vec![("flags".into(), MDNS_FLAGS.into())],
+            flags.clone(),
         )
         .await
         {
             println!(
-                "airdrop    {}  name \"{}\"  ({})",
+                "airdrop    {}  legacy {}  ({})",
                 advert.detail(),
                 config.name,
                 &instance[..12]
             );
+            adverts.push(advert);
+        }
+        let alt_name = airdrop_instance_name(&config.name);
+        if let Some(advert) = advertise("airdrop", ALT_SERVICE_TYPE, &alt_name, port, flags).await {
+            println!("airdrop    {}  alt \"{alt_name}\"", advert.detail());
             adverts.push(advert);
         }
     }
@@ -298,6 +304,28 @@ async fn advertise(
             println!("{label} is not visible on the network: {error}");
             None
         }
+    }
+}
+
+fn airdrop_instance_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if out.len() >= 63 {
+            break;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        let next = ch.len_utf8();
+        if out.len() + next > 63 {
+            break;
+        }
+        out.push(ch);
+    }
+    if out.is_empty() {
+        "Whoosh".into()
+    } else {
+        out
     }
 }
 
