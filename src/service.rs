@@ -147,7 +147,9 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 advert.detail(),
                 config.name
             );
-            println!("quickshare open the share sheet and set it to Everyone");
+            println!(
+                "quickshare open Quick Share, set it to Everyone, and use this Wi-Fi. The phone lists this Mac only while that sheet is open."
+            );
             adverts.push(advert);
         }
         let quick = QuickshareConfig {

@@ -24,7 +24,7 @@ whoosh --help
 whoosh receive --dir ~/Whoosh --name "Harry's Mac"
 ```
 
-This listens for all three protocols until you press Ctrl-C. On macOS it registers them with the system mDNS responder, including AWDL, and prints the IPv4 address Quick Share is pinned to. The phone lists the Mac only while its share sheet is open. AirDrop on the iPhone also has to be set to Everyone for 10 minutes. The name it shows is `--name`.
+This listens for all three protocols until you press Ctrl-C. On macOS it registers them with the system mDNS responder. Quick Share is announced on the LAN interface. An Android phone can list it while the Quick Share sheet is open, on that same Wi-Fi, set to Everyone. The iPhone share sheet does not list this service.
 
 | Flag | Effect |
 | --- | --- |
@@ -71,7 +71,7 @@ The wire format is in [docs/protocol.md](docs/protocol.md).
 | Peer | What works | What does not |
 | --- | --- | --- |
 | Another Whoosh on macOS, Windows, or Linux | QUIC send and receive on the LAN | A public relay. This is a local transfer. |
-| Android Quick Share | Same-Wi-Fi receive and send. mDNS type `_FC9F5ED42C8A._tcp`. UKEY2, then encrypted file frames. On macOS the record is pinned to the printed LAN address. Open the Quick Share sheet and set it to Everyone. | Wi-Fi Direct, and the BLE wake packet from macOS. macOS does not allow the service data Android looks for. The packet builder is in the library for a stack that can send it. |
+| Android Quick Share | Same-Wi-Fi receive and send. mDNS type `_FC9F5ED42C8A._tcp`. UKEY2, then encrypted file frames. On macOS the record is registered on the LAN interface. Open the Quick Share sheet and set it to Everyone. | Wi-Fi Direct, and the BLE wake packet from macOS. macOS does not allow the service data Android looks for. The packet builder is in the library for a stack that can send it. Samsung phones that only scan Bluetooth will not list the Mac. |
 | Apple AirDrop | Discover, Ask, and Upload over HTTPS, plus `_airdrop._tcp`, for a peer that speaks that older service. On macOS the registration includes AWDL and the receiver binds `awdl0`. | The iPhone share sheet. That list is Apple's Companion Link service (`_companion-link._tcp`, rapportd), named with the Mac's computer name. Whoosh does not speak Companion Link, so the sheet does not gain a Whoosh row. Contacts-only mode needs an Apple-signed identity, which is not in this project. The Mac's own row saves into Downloads. Windows and Linux do not have AWDL. |
 
 Quick Share's four-digit code is derived from the UKEY2 authentication string. Compare it on both screens before accepting. AirDrop Everyone mode is a ten-minute choice on the Apple device. The Whoosh receiver still asks before it writes.

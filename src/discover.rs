@@ -1,10 +1,10 @@
 //! mDNS advertisements for the native protocol, Quick Share, and AirDrop.
 //!
 //! On macOS the advertiser is `dns-sd`, which talks to mDNSResponder. That
-//! process already has Local Network permission, and `-includeAWDL` is what
-//! puts `_airdrop._tcp` on the interface an iPhone browses. Quick Share is a
-//! proxy record pinned to the LAN IPv4 so a phone is not handed a tunnel address.
-//! AirDrop is not pinned: a single A record would hide the AWDL address.
+//! process already has Local Network permission. AirDrop is registered with
+//! `-includeAWDL` so the AWDL address stays in the answer. Quick Share is
+//! registered only on the LAN interface: a proxy hostname is not a record
+//! Android Nearby will keep.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -96,7 +96,7 @@ pub fn dns_sd_plan(
     instance: &str,
     port: u16,
     txt: &[(&str, &str)],
-    lan: Option<Ipv4Addr>,
+    lan: Option<(&str, Ipv4Addr)>,
 ) -> Result<DnsSdPlan> {
     if instance.is_empty() || instance.len() > 63 || instance.bytes().any(|byte| byte == 0) {
         return Err(Error::protocol("mDNS instance name must be 1 to 63 bytes"));
@@ -121,8 +121,9 @@ pub fn dns_sd_plan(
         txt_args.push(format!("{key}={value}"));
     }
     let port_text = port.to_string();
-    let mut args = vec!["-includeAWDL".to_string()];
+    let mut args = Vec::new();
     let summary = if keeps_interface_addresses(service_type) || lan.is_none() {
+        args.push("-includeAWDL".into());
         args.push("-R".into());
         args.push(instance.to_string());
         args.push(reg_type);
@@ -131,16 +132,25 @@ pub fn dns_sd_plan(
         args.extend(txt_args);
         "macOS mDNS including AWDL".to_string()
     } else {
-        let ip = lan.expect("lan address checked above");
-        args.push("-P".into());
+        let (interface, ip) = lan.expect("lan address checked above");
+        if interface.is_empty()
+            || !interface
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(Error::protocol("LAN interface name is invalid"));
+        }
+        // A normal registration on the Wi-Fi interface. Android drops a proxy
+        // hostname that does not belong to that interface.
+        args.push("-i".into());
+        args.push(interface.to_string());
+        args.push("-R".into());
         args.push(instance.to_string());
         args.push(reg_type);
         args.push("local".into());
-        args.push(port_text.clone());
-        args.push(format!("whoosh-{port_text}.local"));
-        args.push(ip.to_string());
+        args.push(port_text);
         args.extend(txt_args);
-        format!("macOS mDNS including AWDL, pinned at {ip}")
+        format!("macOS mDNS on {interface} at {ip}")
     };
     Ok(DnsSdPlan { args, summary })
 }
@@ -217,8 +227,20 @@ fn system_advertisement(
     port: u16,
     txt: &[(&str, &str)],
 ) -> std::result::Result<Advertisement, SystemStart> {
-    let lan = crate::net::lan_ipv4();
-    let plan = dns_sd_plan(service_type, instance, port, txt, lan).map_err(SystemStart::Failed)?;
+    let lan = if keeps_interface_addresses(service_type) {
+        None
+    } else {
+        crate::net::lan_address()
+    };
+    let plan = dns_sd_plan(
+        service_type,
+        instance,
+        port,
+        txt,
+        lan.as_ref()
+            .map(|address| (address.interface.as_str(), address.ip)),
+    )
+    .map_err(SystemStart::Failed)?;
     let mut command = std::process::Command::new("dns-sd");
     command
         .args(&plan.args)
@@ -415,7 +437,7 @@ mod tests {
             "aabbccddeeff",
             8770,
             &[("flags", "136")],
-            Some(Ipv4Addr::new(192, 168, 1, 11)),
+            Some(("en0", Ipv4Addr::new(192, 168, 1, 11))),
         )
         .unwrap();
         assert_eq!(
@@ -430,7 +452,7 @@ mod tests {
                 "flags=136",
             ]
         );
-        assert!(!plan.summary.contains("pinned"));
+        assert!(!plan.args.iter().any(|arg| arg == "-i"));
     }
 
     #[test]
@@ -440,24 +462,25 @@ mod tests {
             "I1VYVzD8n14AAA",
             53521,
             &[("n", "e30")],
-            Some(Ipv4Addr::new(192, 168, 1, 11)),
+            Some(("en0", Ipv4Addr::new(192, 168, 1, 11))),
         )
         .unwrap();
         assert_eq!(
             plan.args,
             vec![
-                "-includeAWDL",
-                "-P",
+                "-i",
+                "en0",
+                "-R",
                 "I1VYVzD8n14AAA",
                 "_FC9F5ED42C8A._tcp",
                 "local",
                 "53521",
-                "whoosh-53521.local",
-                "192.168.1.11",
                 "n=e30",
             ]
         );
+        assert!(plan.summary.contains("en0"));
         assert!(plan.summary.contains("192.168.1.11"));
+        assert!(!plan.args.iter().any(|arg| arg == "-P"));
     }
 
     #[test]
@@ -515,7 +538,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_system_mdns_pins_quickshare() {
-        let Some(ip) = crate::net::lan_ipv4() else {
+        let Some(lan) = crate::net::lan_address() else {
             return;
         };
         let instance = crate::quickshare::service_instance_name("Ab12").unwrap();
@@ -528,15 +551,24 @@ mod tests {
             &[("n", "e30")],
         )
         .unwrap_or_else(|error| panic!("register: {error}"));
-        let host = format!("whoosh-{port}.local");
         let output = dns_sd_output(
-            &["-t", "3", "-G", "v4", &host],
-            std::time::Duration::from_secs(6),
+            &[
+                "-t",
+                "4",
+                "-i",
+                &lan.interface,
+                "-L",
+                &instance,
+                "_FC9F5ED42C8A._tcp",
+                "local",
+            ],
+            std::time::Duration::from_secs(8),
         );
         let text = String::from_utf8_lossy(&output);
         assert!(
-            text.contains(&ip.to_string()),
-            "address lookup missed {ip} for {host}: {text}"
+            text.contains(&instance) && text.contains("n=e30") && text.contains(&port.to_string()),
+            "quick share lookup missed {instance} on {}: {text}",
+            lan.interface
         );
         drop(listener);
         advert.shutdown();
