@@ -5,8 +5,9 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::airdrop::{
-    airdrop_visibility_line, macos_computer_name, server_acceptor, AirdropConfig, AirdropReceiver,
-    ALT_SERVICE_TYPE, MDNS_FLAGS, SERVICE_TYPE as AIRDROP_SERVICE,
+    airdrop_visibility_line, companion_txt, macos_computer_name, server_acceptor, AirdropConfig,
+    AirdropReceiver, ALT_SERVICE_TYPE, COMPANION_SERVICE_TYPE, MDNS_FLAGS,
+    SERVICE_TYPE as AIRDROP_SERVICE,
 };
 use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
@@ -236,6 +237,18 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         let alt_name = airdrop_instance_name(&config.name);
         if let Some(advert) = advertise("airdrop", ALT_SERVICE_TYPE, &alt_name, port, flags).await {
             println!("airdrop    {}  alt \"{alt_name}\"", advert.detail());
+            adverts.push(advert);
+        }
+        if let Some(advert) = advertise(
+            "airdrop",
+            COMPANION_SERVICE_TYPE,
+            &alt_name,
+            port,
+            companion_txt(),
+        )
+        .await
+        {
+            println!("airdrop    {}  iphone list \"{alt_name}\"", advert.detail());
             adverts.push(advert);
         }
     }

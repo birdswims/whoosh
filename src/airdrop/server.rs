@@ -65,15 +65,20 @@ impl AirdropReceiver {
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let (socket, _) = accepted?;
+                    let (socket, peer) = accepted?;
                     let this = self.clone();
                     let acceptor = acceptor.clone();
                     tokio::spawn(async move {
                         match acceptor.accept(socket).await {
                             Ok(tls) => {
+                                println!("airdrop    {peer}  discover");
                                 let _ = this.connection(tls).await;
                             }
-                            Err(error) => tracing::debug!(%error, "airdrop tls handshake failed"),
+                            Err(error) => {
+                                println!(
+                                    "airdrop    {peer}  connected, then did not speak AirDrop HTTPS ({error})"
+                                );
+                            }
                         }
                     });
                 }

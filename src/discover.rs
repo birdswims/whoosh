@@ -2,9 +2,11 @@
 //!
 //! On macOS the advertiser is `dns-sd`, which talks to mDNSResponder. That
 //! process already has Local Network permission. AirDrop is registered with
-//! `-includeAWDL` so the AWDL address stays in the answer. Quick Share is
-//! registered only on the LAN interface: a proxy hostname is not a record
-//! Android Nearby will keep.
+//! `-includeAWDL` so the AWDL address stays in the answer. The iPhone share
+//! sheet lists `_companion-link._tcp`. Whoosh registers that type on its own
+//! host (`whoosh-<port>.local`) at the Wi-Fi address, so the row is separate
+//! from the Mac's computer name. Quick Share is registered only on the LAN
+//! interface: a proxy hostname is not a record Android Nearby will keep.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -89,8 +91,10 @@ pub struct DnsSdPlan {
 }
 
 /// Arguments for `dns-sd`. AirDrop stays a normal registration so mDNSResponder
-/// can publish the AWDL address. Other services with a LAN address are proxy
-/// records pinned to that address.
+/// can publish the AWDL address. Companion Link is a proxy on the Wi-Fi
+/// address with its own hostname: the iPhone treats one hostname as one
+/// AirDrop row, and the Mac already publishes the computer name on its
+/// hostname. Quick Share is a normal registration on the LAN interface.
 pub fn dns_sd_plan(
     service_type: &str,
     instance: &str,
@@ -122,7 +126,23 @@ pub fn dns_sd_plan(
     }
     let port_text = port.to_string();
     let mut args = Vec::new();
-    let summary = if keeps_interface_addresses(service_type) || lan.is_none() {
+    let summary = if service_type.contains("_companion-link") {
+        let (interface, ip) = lan
+            .ok_or_else(|| Error::protocol("companion-link needs the Wi-Fi address of this Mac"))?;
+        check_interface(interface)?;
+        let host = format!("whoosh-{port}.local");
+        args.push("-i".into());
+        args.push(interface.to_string());
+        args.push("-P".into());
+        args.push(instance.to_string());
+        args.push(reg_type);
+        args.push("local".into());
+        args.push(port_text);
+        args.push(host);
+        args.push(ip.to_string());
+        args.extend(txt_args);
+        format!("iPhone list on {interface} at {ip} as whoosh-{port}.local")
+    } else if keeps_interface_addresses(service_type) || lan.is_none() {
         args.push("-includeAWDL".into());
         args.push("-R".into());
         args.push(instance.to_string());
@@ -133,13 +153,7 @@ pub fn dns_sd_plan(
         "macOS mDNS including AWDL".to_string()
     } else {
         let (interface, ip) = lan.expect("lan address checked above");
-        if interface.is_empty()
-            || !interface
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-        {
-            return Err(Error::protocol("LAN interface name is invalid"));
-        }
+        check_interface(interface)?;
         // A normal registration on the Wi-Fi interface. Android drops a proxy
         // hostname that does not belong to that interface.
         args.push("-i".into());
@@ -165,6 +179,17 @@ fn keeps_interface_addresses(service_type: &str) -> bool {
     service_type.contains("_airdrop")
 }
 
+fn check_interface(interface: &str) -> Result<()> {
+    if interface.is_empty()
+        || !interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(Error::protocol("LAN interface name is invalid"));
+    }
+    Ok(())
+}
+
 fn dns_sd_type(service_type: &str) -> Result<String> {
     let trimmed = service_type.trim_matches('.');
     let (name, _) = trimmed
@@ -184,14 +209,18 @@ fn userspace_advertisement(
     port: u16,
     txt: &[(&str, &str)],
 ) -> Result<Advertisement> {
+    let companion = service_type.contains("_companion-link");
     let pinned = if keeps_interface_addresses(service_type) {
         None
     } else {
         crate::net::lan_ipv4()
     };
-    let host = match pinned {
-        Some(_) => format!("whoosh-{port}.local."),
-        None => mdns_hostname(),
+    // Companion Link must not reuse the computer's hostname. The iPhone folds
+    // every record on that name into the macOS AirDrop row.
+    let host = if companion || pinned.is_some() {
+        format!("whoosh-{port}.local.")
+    } else {
+        mdns_hostname()
     };
     let ip = pinned.map(|addr| addr.to_string()).unwrap_or_default();
     let mut info = ServiceInfo::new(service_type, instance, &host, ip.as_str(), port, txt)
@@ -254,7 +283,7 @@ fn system_advertisement(
         }
         Err(error) => return Err(SystemStart::Failed(error.into())),
     };
-    if let Err(error) = confirm_registration(&mut child, Duration::from_secs(4)) {
+    if let Err(error) = confirm_registration(&mut child, Duration::from_secs(4), instance) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(SystemStart::Failed(error));
@@ -266,7 +295,11 @@ fn system_advertisement(
 }
 
 #[cfg(target_os = "macos")]
-fn confirm_registration(child: &mut std::process::Child, timeout: Duration) -> Result<()> {
+fn confirm_registration(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    instance: &str,
+) -> Result<()> {
     use std::io::{BufRead, BufReader};
     use std::sync::{Arc, Mutex};
 
@@ -287,7 +320,7 @@ fn confirm_registration(child: &mut std::process::Child, timeout: Duration) -> R
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone();
-        if registration_confirmed(&text) {
+        if registration_confirmed(&text) && text.contains(instance) {
             return Ok(());
         }
         match child.try_wait() {
@@ -472,6 +505,50 @@ mod tests {
     }
 
     #[test]
+    fn companion_link_is_a_separate_device_on_the_lan() {
+        let plan = dns_sd_plan(
+            "_companion-link._tcp.local.",
+            "Harry's Mac",
+            52628,
+            &[("rpFl", "0x20000"), ("rpVr", "715.2")],
+            Some(("en0", Ipv4Addr::new(192, 168, 1, 11))),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "-i",
+                "en0",
+                "-P",
+                "Harry's Mac",
+                "_companion-link._tcp",
+                "local",
+                "52628",
+                "whoosh-52628.local",
+                "192.168.1.11",
+                "rpFl=0x20000",
+                "rpVr=715.2",
+            ]
+        );
+        assert!(plan.summary.contains("iPhone list"));
+        assert!(!plan.args.iter().any(|arg| arg == "-includeAWDL"));
+        assert!(!plan.args.iter().any(|arg| arg.contains("MacBook")));
+    }
+
+    #[test]
+    fn companion_link_without_a_lan_address_is_rejected() {
+        let error = dns_sd_plan(
+            "_companion-link._tcp.local.",
+            "Harry's Mac",
+            9,
+            &[("rpFl", "0x20000")],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Wi-Fi"));
+    }
+
+    #[test]
     fn quickshare_registration_pins_the_lan_address() {
         let plan = dns_sd_plan(
             "_FC9F5ED42C8A._tcp.local.",
@@ -584,6 +661,56 @@ mod tests {
         assert!(
             text.contains(&instance) && text.contains("n=e30") && text.contains(&port.to_string()),
             "quick share lookup missed {instance} on {}: {text}",
+            lan.interface
+        );
+        drop(listener);
+        advert.shutdown();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_companion_link_stays_beside_the_mac() {
+        let Some(lan) = crate::net::lan_address() else {
+            return;
+        };
+        let instance = format!(
+            "Whoosh{:04x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                & 0xFFFF
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let advert = Advertisement::start(
+            "_companion-link._tcp.local.",
+            &instance,
+            port,
+            &[("rpFl", "0x20000"), ("rpBA", "AA:BB:CC:DD:EE:FF")],
+        )
+        .unwrap_or_else(|error| panic!("register: {error}"));
+        let output = dns_sd_output(
+            &[
+                "-t",
+                "4",
+                "-i",
+                &lan.interface,
+                "-L",
+                &instance,
+                "_companion-link._tcp",
+                "local",
+            ],
+            std::time::Duration::from_secs(8),
+        );
+        let text = String::from_utf8_lossy(&output);
+        let host = format!("whoosh-{port}.local");
+        assert!(
+            text.contains(&instance)
+                && text.contains(&host)
+                && text.contains("rpFl=0x20000")
+                && text.contains(&port.to_string()),
+            "companion-link lookup missed {instance} on {}: {text}",
             lan.interface
         );
         drop(listener);
