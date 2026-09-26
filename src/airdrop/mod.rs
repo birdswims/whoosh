@@ -28,10 +28,13 @@ pub const ALT_SERVICE_TYPE: &str = "_airdrop-alt._tcp.local.";
 /// `--name` as a second record, on its own hostname, and does not rename the Mac.
 pub const COMPANION_SERVICE_TYPE: &str = "_companion-link._tcp.local.";
 
-/// mDNS TXT `flags`. Apple ignores a receiver that sets neither mixed-types
-/// (`0x08`) nor pipelining (`0x04`). `0x80` marks support for `/Discover`.
-/// `140` is `0x8C`: discover, mixed types, and pipelining.
-pub const MDNS_FLAGS: &str = "140";
+/// mDNS TXT `flags`. `0x8C` is discover, mixed types, and pipelining.
+/// Bit 14 (`0x4000`) is the nearby-sharing flag. sharingd logs
+/// "missing nearby sharing flag" and drops the node when it is clear.
+/// Bit 16 (`0x10000`) means PIN pair. sharingd then drops the legacy
+/// node and expects a real Rapport identity, which Whoosh does not have.
+/// `16524` is `0x408C`.
+pub const MDNS_FLAGS: &str = "16524";
 
 /// What to print about the phone share sheets.
 pub fn airdrop_visibility_line(whoosh_name: &str, computer_name: &str) -> String {
@@ -98,6 +101,14 @@ fn command_line(program: &str, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::airdrop_visibility_line;
+
+    #[test]
+    fn flags_keep_the_nearby_sharing_bit_and_not_pin_pair() {
+        let flags: u32 = super::MDNS_FLAGS.parse().unwrap();
+        assert_eq!(flags & 0x8C, 0x8C);
+        assert_eq!(flags & 0x4000, 0x4000);
+        assert_eq!(flags & 0x10000, 0);
+    }
 
     #[test]
     fn iphone_keeps_the_mac_name_and_lists_whoosh() {
