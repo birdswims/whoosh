@@ -40,3 +40,29 @@ The native macOS receiver uses Companion Link and application-service pairing re
 The iPhone still browses `_airdrop._tcp`. In `sharingd`, that browser drops a node whose flags lack bit 14 (`0x4000`, the nearby-sharing flag) and drops a node with bit 16 (`0x10000`) because that bit means PIN pair and the device must be discovered over Rapport. Whoosh advertises `16524` (`0x408C`: discover, mixed types, pipelining, and nearby sharing) on one `_airdrop._tcp` instance, including AWDL. The instance is a 12-hex id; the Discover response carries `--name`. Extra named instances and `_airdrop-alt._tcp` registrations were removed after an iOS 27 device displayed the receiver three times. The computer name is not changed, and the macOS row still saves into Downloads. Contacts-only mode needs an Apple-signed identity, which this project does not ship.
 
 Live validation on macOS 27 / iOS 27 confirmed IPv6 TCP connections over `awdl0`, successful TLS and `/Discover` responses, and a visible Whoosh name after enabling AWDL reception and stopping an older concurrent receiver. The capture also contained modern pairing and QUIC service queries; those do not imply that the phone has stopped supporting the legacy HTTPS discovery path. Picker visibility is separate from a completed file-transfer test.
+
+AirDrop uploads can contain either CPIO newc (`070701`) or POSIX odc (`070707`)
+archives. Odc uses octal fields in a 76-byte header and has no newc-style
+four-byte padding. Directory entries, including the archive root, are skipped;
+regular files retain the existing name validation and size limits. DVZip blocks
+use a big-endian 32-bit header whose high bit marks uncompressed data and whose
+remaining bits give the block length. Compressed blocks are inflated within the
+remaining size budget, and framing/decoding errors are returned to the sender
+and printed in the terminal. The test fixture comes from bsdtar, independently
+of Whoosh's own archive writer; an HTTPS test exercises chunked Ask and Upload
+requests with `Expect: 100-continue`.
+
+The approval prompt says `size unknown` for AirDrop offers whose size Whoosh
+does not know. Previously it displayed a hardcoded `0 B`; that did not indicate
+an empty photo. Successful uploads print the saved file count and byte count.
+
+Quick Share UKEY2 derives its authentication and next-protocol secrets from
+`SHA256(ECDH shared x)`, followed by HKDF-SHA256 with the UKEY2 salts and the
+serialized ClientInit + ServerInit transcript. This matches Google's
+[KeyAgreementSha256](https://github.com/google/ukey2/blob/master/src/securemessage/src/securemessage/crypto_ops.cc)
+and [UKEY2 handshake](https://github.com/google/ukey2/blob/master/src/main/cpp/src/securegcm/ukey2_handshake.cc).
+Passing the raw ECDH value to HKDF produces incompatible encryption keys even
+though the handshake reaches PIN generation. A fixed derivation vector computed
+with Python hashlib/hmac tests this independently of Whoosh-to-Whoosh round trips.
+Quick Share session failures are logged at warning level, and successful
+receives print the saved file count and byte count.

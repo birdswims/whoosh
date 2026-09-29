@@ -261,8 +261,11 @@ fn derive(shared_x: &[u8], client_init: &[u8], server_init: &[u8]) -> Result<Sha
     let mut info = Vec::with_capacity(client_init.len() + server_init.len());
     info.extend_from_slice(client_init);
     info.extend_from_slice(server_init);
-    let auth = hkdf(shared_x, b"UKEY2 v1 auth", &info)?;
-    let next = hkdf(shared_x, b"UKEY2 v1 next", &info)?;
+    // Match Google's CryptoOps::KeyAgreementSha256: HKDF consumes the digest
+    // of the ECDH agreement, not its raw x coordinate.
+    let shared_key = Sha256::digest(shared_x);
+    let auth = hkdf(&shared_key, b"UKEY2 v1 auth", &info)?;
+    let next = hkdf(&shared_key, b"UKEY2 v1 next", &info)?;
     Ok(SharedSecrets {
         auth_string: auth,
         next_secret: next,
@@ -368,6 +371,24 @@ fn parse_twos(bytes: &[u8]) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::{pin_from_auth, twos_complement, ClientHandshake, ServerHandshake};
+
+    #[test]
+    fn derives_secrets_from_sha256_of_ecdh_agreement() {
+        // Google's CryptoOps::KeyAgreementSha256 hashes the ECDH result before
+        // UKEY2's HKDF. Expected values were calculated independently with
+        // Python hashlib/hmac (RFC 5869 extract + one expand block).
+        let shared_x: Vec<u8> = (0..32).collect();
+        let secrets =
+            super::derive(&shared_x, b"client-init-fixture", b"server-init-fixture").unwrap();
+        assert_eq!(
+            hex::encode(secrets.auth_string),
+            "c15f043bb8fab70ab5ed6a46d951f8c7c1e98a9c06f7e7ff1dbc699809fc401b"
+        );
+        assert_eq!(
+            hex::encode(secrets.next_secret),
+            "2285df4bcbbd434de7698326613eba37d9e0a0cda6c6c446a884b24fe9874d71"
+        );
+    }
 
     #[test]
     fn both_sides_derive_the_same_secret_and_can_exchange() {

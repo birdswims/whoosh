@@ -126,8 +126,8 @@ fn broadcast(name: &str, stop: &AtomicBool) {
         println!("bluetooth  advertisement was not accepted ({error})");
         return;
     }
-    println!("bluetooth  broadcasting Quick Share and AirDrop as \"{name}\"");
     let mut tick = 0u8;
+    let mut announced = false;
     while !stop.load(Ordering::Relaxed) {
         let packet = match tick % 3 {
             0 => {
@@ -138,13 +138,28 @@ fn broadcast(name: &str, stop: &AtomicBool) {
             1 => airdrop_advertisement(),
             _ => name_response(name),
         };
-        if controller.set_advertisement(&packet).is_err()
-            || controller.set_scan_response(&name_response(name)).is_err()
-        {
-            println!("bluetooth  advertisement stopped");
+        if let Err(error) = controller.set_advertisement(&packet) {
+            eprintln!(
+                "bluetooth  could not set advertisement ({error}); discovery may be unavailable"
+            );
             break;
         }
-        let _ = controller.set_enabled(true);
+        if let Err(error) = controller.set_scan_response(&name_response(name)) {
+            eprintln!(
+                "bluetooth  could not set scan response ({error}); discovery may be unavailable"
+            );
+            break;
+        }
+        if let Err(error) = controller.set_enabled(true) {
+            eprintln!(
+                "bluetooth  could not enable advertising ({error}); discovery may be unavailable"
+            );
+            break;
+        }
+        if !announced {
+            println!("bluetooth  advertising commands accepted for Quick Share and AirDrop as \"{name}\"");
+            announced = true;
+        }
         tick = tick.wrapping_add(1);
         for _ in 0..4 {
             if stop.load(Ordering::Relaxed) {

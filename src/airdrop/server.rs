@@ -151,7 +151,11 @@ impl AirdropReceiver {
                     return Err(error);
                 }
             };
+            let path = request.path.clone();
             let (status, reason, content_type, body) = self.dispatch(request).await;
+            if status >= 400 {
+                tracing::warn!(%path, status, error = %String::from_utf8_lossy(&body), "AirDrop request failed");
+            }
             http::write_response(&mut socket, status, reason, content_type, &body).await?;
             if status >= 400 && status != 409 {
                 return Ok(());
@@ -235,6 +239,7 @@ impl AirdropReceiver {
             return (409, "Conflict", "text/plain", b"declined".to_vec());
         }
         *self.pending.lock().await = Pending { accepted: true };
+        println!("airdrop    accepted; waiting for the sender to upload");
         match protocol::ask_response(&self.config.name, &self.config.model) {
             Ok(body) => (200, "OK", "application/octet-stream", body),
             Err(error) => (
@@ -260,6 +265,10 @@ impl AirdropReceiver {
             .get("content-type")
             .cloned()
             .unwrap_or_else(|| "application/x-cpio".into());
+        println!(
+            "airdrop    upload received: {} bytes ({content_type})",
+            request.body.len()
+        );
         let entries = match protocol::extract_upload(
             &request.body,
             &content_type,
@@ -276,6 +285,8 @@ impl AirdropReceiver {
                 );
             }
         };
+        let count = entries.len();
+        let bytes: usize = entries.iter().map(|entry| entry.bytes.len()).sum();
         for entry in entries {
             let (kind, mime) = sniff(&entry.bytes, &entry.name);
             let _ = mime;
@@ -301,6 +312,10 @@ impl AirdropReceiver {
             }
         }
         *self.pending.lock().await = Pending { accepted: false };
+        println!(
+            "airdrop    saved {count} file(s), {bytes} bytes, to {}",
+            self.config.dir.display()
+        );
         (200, "OK", "application/octet-stream", Vec::new())
     }
 }
@@ -544,6 +559,57 @@ mod tests {
             value.as_dictionary().unwrap()["ReceiverComputerName"].as_string(),
             Some("Harry's Mac")
         );
+    }
+
+    #[tokio::test]
+    async fn receives_iphone_style_chunked_odc_upload_over_tls() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = crate::net::bind_airdrop_listener("[::1]:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = AirdropReceiver::new(AirdropConfig::auto(dir.path()));
+        let (acceptor, cert) = crate::airdrop::server_acceptor().unwrap();
+        let connector = crate::airdrop::client_connector(cert).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(receiver.serve_tls(listener, acceptor, cancel.clone()));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut socket = connector.connect(crate::airdrop::server_name(), socket).await.unwrap();
+            let ask = super::protocol::ask_request("iPhone", "phone", &[("IMG_9457.jpg".into(), "image/jpeg".into())]).unwrap();
+            let archive = include_bytes!("../../tests/fixtures/airdrop-odc.cpio");
+            let mut upload = (0x8000_0000 | archive.len() as u32).to_be_bytes().to_vec();
+            upload.extend_from_slice(archive); // stored DVZip block, no terminator
+            for (path, content_type, body) in [
+                ("/Ask", "application/octet-stream", ask),
+                ("/Upload", "application/x-dvzip", upload),
+            ] {
+                socket.write_all(format!(
+                    "POST {path} HTTP/1.1\r\nHost: AirDrop\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n"
+                ).as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                let interim = super::http::read_request(&mut socket, 4096).await.unwrap();
+                assert_eq!(interim.path, "100");
+                for chunk in body.chunks(53) {
+                    socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+                    socket.write_all(chunk).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                }
+                socket.write_all(b"0\r\n\r\n").await.unwrap();
+                socket.flush().await.unwrap();
+                let response = super::http::read_request(&mut socket, 4096).await.unwrap();
+                assert_eq!(response.path, "200", "{path}: {}", String::from_utf8_lossy(&response.body));
+            }
+            socket.shutdown().await.unwrap();
+        }).await;
+        cancel.cancel();
+        server.await.unwrap().unwrap();
+        result.expect("iPhone-style transfer stalled");
+        assert_eq!(
+            std::fs::read(dir.path().join("IMG_9457.jpg")).unwrap(),
+            b"\xff\xd8\xff\xe0whoosh-fixture\xff\xd9"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]

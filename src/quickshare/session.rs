@@ -65,8 +65,13 @@ pub async fn serve(
                 tracing::debug!(%peer, "quick share connection");
                 let config = config.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_server(socket, config).await {
-                        tracing::debug!(%error, "quick share session ended");
+                    match handle_server(socket, config).await {
+                        Ok(done) if done.accepted => println!(
+                            "quickshare saved {} file(s), {} bytes",
+                            done.files.len(), done.bytes
+                        ),
+                        Ok(_) => {},
+                        Err(error) => tracing::warn!(%peer, %error, "quick share session failed"),
                     }
                 });
             }

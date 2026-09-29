@@ -253,7 +253,12 @@ pub fn interactive_approval() -> Approval {
             println!("  pin {pin}");
         }
         for file in &offer.files {
-            println!("  {}  {}  {}", file.name, human_size(file.bytes), file.mime);
+            let size = if offer.protocol == "airdrop" && file.bytes == 0 {
+                "size unknown".into()
+            } else {
+                human_size(file.bytes)
+            };
+            println!("  {}  {}  {}", file.name, size, file.mime);
         }
         println!("accept? [y/N]");
         let line = tokio::task::spawn_blocking(|| {

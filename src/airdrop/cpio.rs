@@ -1,4 +1,4 @@
-//! CPIO "newc" archives, gzip, and the length-prefixed DVZip wrapper used by AirDrop uploads.
+//! CPIO newc/odc archives, gzip, and the length-prefixed DVZip wrapper used by AirDrop uploads.
 
 use std::io::{self, Read, Write};
 
@@ -61,25 +61,45 @@ where
 {
     let mut total = 0u64;
     loop {
-        let mut header = [0u8; HEADER_LEN];
-        match reader.read_exact(&mut header) {
+        let mut magic = [0u8; 6];
+        match reader.read_exact(&mut magic) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                 return Err(Error::protocol("truncated cpio archive"));
             }
             Err(error) => return Err(error.into()),
         }
-        if &header[..6] != b"070701" {
-            return Err(Error::protocol("cpio archive is not newc"));
-        }
-        let namesize = hex_field(&header, 94)?;
-        let filesize = hex_field(&header, 54)? as u64;
+        let (header_len, aligned) = match &magic {
+            b"070701" => (HEADER_LEN, true),
+            b"070707" => (76, false),
+            _ => return Err(Error::protocol("unsupported cpio archive format")),
+        };
+        let mut header = vec![0u8; header_len];
+        header[..6].copy_from_slice(&magic);
+        reader.read_exact(&mut header[6..])?;
+        let (namesize, filesize, mode) = if aligned {
+            (
+                hex_field(&header, 94)?,
+                hex_field(&header, 54)?,
+                hex_field(&header, 14)?,
+            )
+        } else {
+            // POSIX odc has octal fields and no padding between names/data.
+            (
+                number_field(&header, 59, 6, 8)?,
+                number_field(&header, 65, 11, 8)?,
+                number_field(&header, 18, 6, 8)?,
+            )
+        };
+        let filesize = filesize as u64;
         if namesize == 0 || namesize > 1024 {
             return Err(Error::protocol("cpio name length"));
         }
         let mut name_buf = vec![0u8; namesize];
         reader.read_exact(&mut name_buf)?;
-        skip_pad(&mut reader, HEADER_LEN + namesize)?;
+        if aligned {
+            skip_pad(&mut reader, header_len + namesize)?;
+        }
         if filesize > max_bytes || total.saturating_add(filesize) > max_bytes {
             return Err(Error::TooLarge);
         }
@@ -87,11 +107,30 @@ where
         if filesize > 0 {
             reader.read_exact(&mut data)?;
         }
-        skip_pad(&mut reader, filesize as usize)?;
-        let raw_name = std::str::from_utf8(name_buf.split(|&byte| byte == 0).next().unwrap_or(b""))
+        if aligned {
+            skip_pad(&mut reader, filesize as usize)?;
+        }
+        if name_buf.last() != Some(&0) || name_buf[..namesize - 1].contains(&0) {
+            return Err(Error::protocol("cpio name is not NUL terminated"));
+        }
+        let raw_name = std::str::from_utf8(&name_buf[..namesize - 1])
             .map_err(|_| Error::protocol("cpio name is not utf-8"))?;
         if raw_name == "TRAILER!!!" {
             break;
+        }
+        if mode & 0o170000 == 0o040000 {
+            // Apple/libarchive may include the archive root. We flatten file
+            // paths and do not create archive directories.
+            if filesize != 0 {
+                return Err(Error::protocol("cpio directory contains data"));
+            }
+            if raw_name != "." && raw_name != "./" {
+                archive_member_name(raw_name)?;
+            }
+            continue;
+        }
+        if mode & 0o170000 != 0o100000 {
+            return Err(Error::protocol("cpio entry is not a regular file"));
         }
         let name = archive_member_name(raw_name)?;
         total += filesize;
@@ -105,11 +144,11 @@ fn decode_container(body: &[u8], content_type: &str, max_bytes: u64) -> Result<V
     if body.starts_with(&[0x1F, 0x8B]) || kind.contains("gzip") {
         return inflate(GzDecoder::new(body), max_bytes);
     }
-    if body.starts_with(b"070701") {
+    if body.starts_with(b"070701") || body.starts_with(b"070707") {
         return Ok(body.to_vec());
     }
     if kind.contains("dvzip") || looks_like_dvzip(body) {
-        return inflate(DvzipDecoder::new(body), max_bytes);
+        return decode_dvzip(body, max_bytes);
     }
     inflate(GzDecoder::new(body), max_bytes)
 }
@@ -134,71 +173,51 @@ fn looks_like_dvzip(body: &[u8]) -> bool {
     if body.len() < 6 {
         return false;
     }
-    let len = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
-    len > 0 && len < body.len() && (body[4] == 0x78 || body[4..].starts_with(&[0x1F, 0x8B]))
+    let header = u32::from_be_bytes(body[..4].try_into().unwrap());
+    let len = (header & 0x7fff_ffff) as usize;
+    len > 0
+        && len <= body.len() - 4
+        && (header & 0x8000_0000 != 0 || body[4] == 0x78 || body[4..].starts_with(&[0x1F, 0x8B]))
 }
 
-struct DvzipDecoder<'a> {
-    input: &'a [u8],
-    output: Vec<u8>,
-    cursor: usize,
-}
-
-impl<'a> DvzipDecoder<'a> {
-    fn new(input: &'a [u8]) -> Self {
-        Self {
-            input,
-            output: Vec::new(),
-            cursor: 0,
+fn decode_dvzip(mut input: &[u8], max_bytes: u64) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    // Apple uploads can end at a block boundary without a zero-length marker.
+    while !input.is_empty() {
+        if input.len() < 4 {
+            return Err(Error::protocol("truncated dvzip header"));
         }
-    }
-
-    fn pull(&mut self) -> Result<()> {
-        while self.cursor < 4 || self.output.is_empty() {
-            if self.input.len() < 4 {
-                return Err(Error::protocol("truncated dvzip"));
+        let header = u32::from_be_bytes(input[..4].try_into().unwrap());
+        let stored = header & 0x8000_0000 != 0;
+        let len = (header & 0x7fff_ffff) as usize;
+        input = &input[4..];
+        if len == 0 {
+            if !input.is_empty() {
+                return Err(Error::protocol("data after dvzip terminator"));
             }
-            let len = u32::from_be_bytes(self.input[..4].try_into().unwrap()) as usize;
-            self.input = &self.input[4..];
-            if len == 0 {
-                return Ok(());
+            break;
+        }
+        if len > input.len() || len > 16 * 1024 * 1024 {
+            return Err(Error::protocol("bad dvzip chunk length"));
+        }
+        let (chunk, rest) = input.split_at(len);
+        input = rest;
+        let remaining = max_bytes.saturating_sub(output.len() as u64);
+        if stored {
+            if len as u64 > remaining {
+                return Err(Error::TooLarge);
             }
-            if self.input.len() < len || len > 16 * 1024 * 1024 {
-                return Err(Error::protocol("bad dvzip chunk"));
-            }
-            let chunk = &self.input[..len];
-            self.input = &self.input[len..];
+            output.extend_from_slice(chunk);
+        } else {
             let decoded = if chunk.starts_with(&[0x1F, 0x8B]) {
-                inflate(GzDecoder::new(chunk), u64::MAX / 4)?
+                inflate(GzDecoder::new(chunk), remaining)?
             } else {
-                inflate(ZlibDecoder::new(chunk), u64::MAX / 4)?
+                inflate(ZlibDecoder::new(chunk), remaining)?
             };
-            self.output.extend_from_slice(&decoded);
-            if !self.output.is_empty() {
-                return Ok(());
-            }
+            output.extend_from_slice(&decoded);
         }
-        Ok(())
     }
-}
-
-impl Read for DvzipDecoder<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.cursor >= self.output.len() {
-            self.output.clear();
-            self.cursor = 0;
-            if self.pull().is_err() && self.output.is_empty() {
-                return Ok(0);
-            }
-        }
-        if self.cursor >= self.output.len() {
-            return Ok(0);
-        }
-        let n = (self.output.len() - self.cursor).min(buf.len());
-        buf[..n].copy_from_slice(&self.output[self.cursor..self.cursor + n]);
-        self.cursor += n;
-        Ok(n)
-    }
+    Ok(output)
 }
 
 fn pack_newc(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
@@ -257,9 +276,13 @@ fn skip_pad<R: Read>(reader: &mut R, len: usize) -> Result<()> {
 }
 
 fn hex_field(header: &[u8], offset: usize) -> Result<usize> {
-    let text = std::str::from_utf8(&header[offset..offset + 8])
+    number_field(header, offset, 8, 16)
+}
+
+fn number_field(header: &[u8], offset: usize, len: usize, radix: u32) -> Result<usize> {
+    let text = std::str::from_utf8(&header[offset..offset + len])
         .map_err(|_| Error::protocol("cpio header"))?;
-    usize::from_str_radix(text, 16).map_err(|_| Error::protocol("cpio header"))
+    usize::from_str_radix(text, radix).map_err(|_| Error::protocol("cpio header"))
 }
 
 #[cfg(test)]
@@ -268,6 +291,70 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Write;
+
+    const ODC: &[u8] = include_bytes!("../../tests/fixtures/airdrop-odc.cpio");
+
+    #[test]
+    fn reads_odc_archive_from_bsdtar() {
+        let entries = unpack(ODC, "application/x-cpio", 4096).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "IMG_9457.jpg");
+        assert_eq!(entries[0].bytes, b"\xff\xd8\xff\xe0whoosh-fixture\xff\xd9");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(ODC).unwrap();
+        let entries = unpack(&encoder.finish().unwrap(), "application/x-cpio", 4096).unwrap();
+        assert_eq!(entries[0].name, "IMG_9457.jpg");
+    }
+
+    #[test]
+    fn odc_rejects_traversal_links_and_oversized_files() {
+        let name = b"./IMG_9457.jpg";
+        let start = ODC
+            .windows(name.len())
+            .position(|window| window == name)
+            .unwrap();
+        let mut traversal = ODC.to_vec();
+        traversal[start..start + name.len()].copy_from_slice(b"../IMG9457.jpg");
+        assert!(unpack(&traversal, "application/x-cpio", 4096).is_err());
+        let mut link = ODC.to_vec();
+        link[start - 76 + 18..start - 76 + 24].copy_from_slice(b"120777");
+        assert!(unpack(&link, "application/x-cpio", 4096).is_err());
+        let mut oversized = ODC.to_vec();
+        oversized[start - 11..start].copy_from_slice(b"77777777777");
+        assert!(unpack(&oversized, "application/x-cpio", 4096).is_err());
+    }
+
+    #[test]
+    fn reads_mixed_stored_and_compressed_dvzip_without_terminator() {
+        let mut body = Vec::new();
+        for (index, chunk) in ODC.chunks(37).enumerate() {
+            if index % 2 == 0 {
+                body.extend_from_slice(&(0x8000_0000 | chunk.len() as u32).to_be_bytes());
+                body.extend_from_slice(chunk);
+            } else {
+                let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Compression::fast());
+                encoder.write_all(chunk).unwrap();
+                let compressed = encoder.finish().unwrap();
+                body.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+                body.extend_from_slice(&compressed);
+            }
+        }
+        let entries = unpack(&body, "application/x-dvzip", 4096).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].bytes, b"\xff\xd8\xff\xe0whoosh-fixture\xff\xd9");
+        assert!(unpack(&body, "application/x-dvzip", 64).is_err());
+    }
+
+    #[test]
+    fn dvzip_does_not_hide_corrupt_or_truncated_blocks() {
+        let mut body = pack_dvzip(&[("a.txt".into(), b"hello".to_vec())]).unwrap();
+        body.truncate(body.len() - 4); // replace the terminator with a broken block
+        for bad in [&[0, 0][..], &[0, 0, 0, 8, 1, 2], &[0, 0, 0, 2, 1, 2]] {
+            let mut broken = body.clone();
+            broken.extend_from_slice(bad);
+            assert!(unpack(&broken, "application/x-dvzip", 4096).is_err());
+        }
+    }
 
     #[test]
     fn gzip_cpio_roundtrips_and_rejects_parents() {
