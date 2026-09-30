@@ -66,3 +66,18 @@ though the handshake reaches PIN generation. A fixed derivation vector computed
 with Python hashlib/hmac tests this independently of Whoosh-to-Whoosh round trips.
 Quick Share session failures are logged at warning level, and successful
 receives print the saved file count and byte count.
+
+Windows Quick Share can send non-UTF-8 data in connection-request field 2
+(`endpoint_name`), despite its upstream proto declaration as a string. Whoosh
+decodes that length-delimited field as bytes so it does not reject the request
+before UKEY2. Display names prefer `endpoint_info`, then a decodable endpoint
+record or valid text in the legacy field, otherwise `Quick Share device`.
+A synthetic binary-field request is tested through the encrypted handshake;
+this is separate from verification of a complete transfer from a Windows PC.
+
+Quick Share retains partially read frame prefixes and bodies across `select!`
+cancellation. Keepalive ticks and approval decisions must not discard bytes
+already consumed from TCP. The regression test interrupts a read at every byte
+boundary and checks the following frame as well. Frame-size and control-payload
+errors identify the relevant packet limit; offered-file errors report the
+declared size and configured limit separately.

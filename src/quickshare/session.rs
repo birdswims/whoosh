@@ -12,7 +12,7 @@ use tokio::time::{interval, timeout, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::approve::{approve_all, Approval, IncomingFile, TransferOffer};
-use crate::error::{self, Error, Result};
+use crate::error::{Error, Result};
 use crate::mime::{kind_of_mime, sniff, MediaKind};
 use crate::paths::{destination, partial_path};
 use crate::quickshare::endpoint::{self, EndpointInfo, DEVICE_LAPTOP};
@@ -117,7 +117,8 @@ async fn send_prepared(
         .await
         .map_err(|_| Error::Timeout)??;
     let _ = socket.set_nodelay(true);
-    let (mut reader, writer) = socket.into_split();
+    let (reader, writer) = socket.into_split();
+    let mut reader = FrameReader::new(reader);
     let (outgoing, writer_task) = spawn_writer(writer);
 
     let endpoint_id = endpoint::random_endpoint_id();
@@ -131,7 +132,7 @@ async fn send_prepared(
             conn::V1Frame {
                 connection_request: Some(conn::ConnectionRequestFrame {
                     endpoint_id: Some(endpoint_id),
-                    endpoint_name: Some(name.to_string()),
+                    endpoint_name: Some(name.as_bytes().to_vec()),
                     nonce: Some(i32::from_le_bytes(nonce)),
                     mediums: vec![conn::WIFI_LAN],
                     endpoint_info: Some(info.encode()?),
@@ -241,7 +242,8 @@ async fn send_prepared(
 
 async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<TransferDone> {
     let _ = socket.set_nodelay(true);
-    let (mut reader, writer) = socket.into_split();
+    let (reader, writer) = socket.into_split();
+    let mut reader = FrameReader::new(reader);
     let (outgoing, writer_task) = spawn_writer(writer);
     let request = read_message::<conn::OfflineFrame>(&mut reader).await?;
     let peer_name = peer_name_from_request(&request);
@@ -404,7 +406,10 @@ fn on_share_frame(
                 let size = u64::try_from(file.size.unwrap_or(0)).unwrap_or(u64::MAX);
                 if size > config.max_file_bytes {
                     send_bytes_payload(outgoing, secure, &share_response(share::NOT_ENOUGH_SPACE))?;
-                    return Err(Error::TooLarge);
+                    return Err(Error::protocol(format!(
+                        "quick share file {name:?} declares {size} bytes; limit is {} bytes",
+                        config.max_file_bytes
+                    )));
                 }
                 let mime = file
                     .mime_type
@@ -688,7 +693,10 @@ fn push_payload(
         ));
     }
     if entry.buf.len() + body.len() > wire_max() {
-        return Err(Error::TooLarge);
+        return Err(Error::protocol(format!(
+            "quick share control payload exceeds {} bytes",
+            wire_max()
+        )));
     }
     entry.buf.extend_from_slice(&body);
     let last = chunk.flags.unwrap_or(0) & conn::LAST_CHUNK != 0;
@@ -866,7 +874,7 @@ fn peer_name_from_request(frame: &conn::OfflineFrame) -> String {
         .as_ref()
         .and_then(|v1| v1.connection_request.as_ref())
     else {
-        return "Android".into();
+        return "Quick Share device".into();
     };
     if let Some(info) = request
         .endpoint_info
@@ -877,11 +885,17 @@ fn peer_name_from_request(frame: &conn::OfflineFrame) -> String {
             return name;
         }
     }
-    request
-        .endpoint_name
-        .clone()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Android".into())
+    let legacy = request.endpoint_name.as_deref().unwrap_or_default();
+    if let Ok(info) = EndpointInfo::decode(legacy) {
+        if let Some(name) = info.name.filter(|name| !name.is_empty()) {
+            return name;
+        }
+    }
+    std::str::from_utf8(legacy)
+        .ok()
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        .unwrap_or("Quick Share device")
+        .to_string()
 }
 
 fn new_id() -> i64 {
@@ -910,21 +924,67 @@ fn decode_frame<T: Message + Default>(bytes: &[u8]) -> Result<T> {
 }
 
 async fn read_message<T: Message + Default>(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    reader: &mut FrameReader<tokio::net::tcp::OwnedReadHalf>,
 ) -> Result<T> {
     decode_frame(&read_body(reader).await?)
 }
 
-async fn read_body(reader: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    error::read_exact(reader, &mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > wire_max() {
-        return Err(Error::TooLarge);
+// Keep partial frames outside the read future: select! cancels that future
+// whenever a keepalive or approval branch wins.
+struct FrameReader<R> {
+    stream: R,
+    prefix: [u8; 4],
+    prefix_read: usize,
+    body: Vec<u8>,
+    body_read: usize,
+}
+
+impl<R> FrameReader<R> {
+    fn new(stream: R) -> Self {
+        Self {
+            stream,
+            prefix: [0; 4],
+            prefix_read: 0,
+            body: Vec::new(),
+            body_read: 0,
+        }
     }
-    let mut body = vec![0u8; len];
-    error::read_exact(reader, &mut body).await?;
-    Ok(body)
+}
+
+async fn read_body<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut FrameReader<R>,
+) -> Result<Vec<u8>> {
+    while reader.prefix_read < 4 {
+        let n = reader
+            .stream
+            .read(&mut reader.prefix[reader.prefix_read..])
+            .await?;
+        if n == 0 {
+            return Err(Error::Closed);
+        }
+        reader.prefix_read += n;
+    }
+    let len = u32::from_be_bytes(reader.prefix) as usize;
+    if len > wire_max() {
+        return Err(Error::protocol(format!(
+            "quick share frame length {len} exceeds {} bytes",
+            wire_max()
+        )));
+    }
+    reader.body.resize(len, 0);
+    while reader.body_read < len {
+        let n = reader
+            .stream
+            .read(&mut reader.body[reader.body_read..])
+            .await?;
+        if n == 0 {
+            return Err(Error::Closed);
+        }
+        reader.body_read += n;
+    }
+    reader.prefix_read = 0;
+    reader.body_read = 0;
+    Ok(std::mem::take(&mut reader.body))
 }
 
 fn spawn_writer(
@@ -1001,6 +1061,40 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
 
+    #[tokio::test]
+    async fn frame_read_survives_cancellation_at_every_byte() {
+        use super::*;
+        let (stream, mut writer) = tokio::io::duplex(128);
+        let mut reader = FrameReader::new(stream);
+        let body = b"\xff\xff\xff\xff fragmented encrypted message";
+        let mut packet = (body.len() as u32).to_be_bytes().to_vec();
+        packet.extend_from_slice(body);
+        for byte in &packet[..packet.len() - 1] {
+            writer.write_all(&[*byte]).await.unwrap();
+            // Poll until blocked, then cancel as select! does when another
+            // branch wins. This covers split prefixes and split bodies.
+            let read = read_body(&mut reader);
+            tokio::pin!(read);
+            assert!(futures::poll!(read).is_pending());
+        }
+        writer.write_all(&packet[packet.len() - 1..]).await.unwrap();
+        assert_eq!(read_body(&mut reader).await.unwrap(), body);
+        writer.write_all(&[0, 0, 0, 2, b'o', b'k']).await.unwrap();
+        assert_eq!(read_body(&mut reader).await.unwrap(), b"ok");
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_reports_packet_length_without_allocating_body() {
+        use super::*;
+        let (stream, mut writer) = tokio::io::duplex(8);
+        let mut reader = FrameReader::new(stream);
+        let size = (wire_max() + 1) as u32;
+        writer.write_all(&size.to_be_bytes()).await.unwrap();
+        let error = read_body(&mut reader).await.unwrap_err().to_string();
+        assert!(error.contains("frame length 8388609"));
+        assert!(reader.body.is_empty());
+    }
+
     async fn pair() -> (TcpListener, SocketAddr, tempfile::TempDir) {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -1008,6 +1102,86 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let dir = tempfile::tempdir().unwrap();
         (listener, addr, dir)
+    }
+
+    #[tokio::test]
+    async fn binary_endpoint_name_reaches_encrypted_handshake() {
+        use super::*;
+        use prost::Message;
+
+        let (listener, addr, dir) = pair().await;
+        let config = QuickshareConfig::auto(dir.path());
+        let server = tokio::spawn(async move { accept_one(listener, config).await });
+        let socket = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = socket.into_split();
+        let mut reader = FrameReader::new(reader);
+        // Independently encoded protobuf: request field 2 contains FF FE.
+        // A prost string rejects this before UKEY2 can start.
+        let request = [
+            0x08, 0x01, 0x12, 0x08, 0x08, 0x01, 0x12, 0x04, 0x12, 0x02, 0xff, 0xfe,
+        ];
+        write_body(&mut writer, &request).await.unwrap();
+        let client = ClientHandshake::start().unwrap();
+        let finish = client.client_finish().to_vec();
+        write_body(&mut writer, client.client_init()).await.unwrap();
+        let init = timeout(Duration::from_secs(3), read_body(&mut reader))
+            .await
+            .unwrap()
+            .unwrap();
+        let secrets = client.finish(&init).unwrap();
+        write_body(&mut writer, &finish).await.unwrap();
+        let response = read_message::<conn::OfflineFrame>(&mut reader)
+            .await
+            .unwrap();
+        assert!(connection_accepted(&response));
+        write_body(
+            &mut writer,
+            &conn::OfflineFrame::connection_response().encode_to_vec(),
+        )
+        .await
+        .unwrap();
+        let encrypted = timeout(Duration::from_secs(3), read_body(&mut reader))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut channel = secrets.client_channel().unwrap();
+        let plain = channel.decrypt(&encrypted).unwrap();
+        let frame = conn::OfflineFrame::decode(plain.as_slice()).unwrap();
+        assert_eq!(frame.v1.unwrap().frame_type, Some(conn::PAYLOAD_TRANSFER));
+        drop(writer);
+        drop(reader);
+        let _ = timeout(Duration::from_secs(3), server).await.unwrap();
+    }
+
+    #[test]
+    fn endpoint_display_name_supports_binary_and_legacy_fields() {
+        use super::*;
+        let mut request = conn::ConnectionRequestFrame::default();
+        let name = |request| {
+            peer_name_from_request(&conn::OfflineFrame::new(
+                conn::CONNECTION_REQUEST,
+                conn::V1Frame {
+                    connection_request: Some(request),
+                    ..conn::V1Frame::empty()
+                },
+            ))
+        };
+        request.endpoint_name = Some(vec![0xff, 0xfe]);
+        assert_eq!(name(request.clone()), "Quick Share device");
+        request.endpoint_name = Some("Windows PC".as_bytes().to_vec());
+        assert_eq!(name(request.clone()), "Windows PC");
+        request.endpoint_name = Some(
+            EndpointInfo::visible("Legacy PC", DEVICE_LAPTOP)
+                .encode()
+                .unwrap(),
+        );
+        assert_eq!(name(request.clone()), "Legacy PC");
+        request.endpoint_info = Some(
+            EndpointInfo::visible("Current PC", DEVICE_LAPTOP)
+                .encode()
+                .unwrap(),
+        );
+        assert_eq!(name(request), "Current PC");
     }
 
     #[tokio::test]

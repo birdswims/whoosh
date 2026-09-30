@@ -54,8 +54,11 @@ pub mod conn {
     pub struct ConnectionRequestFrame {
         #[prost(string, optional, tag = "1")]
         pub endpoint_id: Option<String>,
-        #[prost(string, optional, tag = "2")]
-        pub endpoint_name: Option<String>,
+        // The upstream proto calls this a string, but Windows sends binary
+        // endpoint data here. Preserve the length-delimited bytes and decode
+        // a display name separately instead of rejecting the whole request.
+        #[prost(bytes = "vec", optional, tag = "2")]
+        pub endpoint_name: Option<Vec<u8>>,
         #[prost(int32, optional, tag = "4")]
         pub nonce: Option<i32>,
         #[prost(int32, repeated, packed = "false", tag = "5")]
