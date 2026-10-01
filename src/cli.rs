@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use crate::airdrop::{interoperable_connector, send_plain, send_tls};
 use crate::discover::{self, device_name};
 use crate::error::{Error, Result};
-use crate::native::{self, fingerprint_hex, Trust};
+use crate::native::{self, fingerprint_hex};
 use crate::quickshare::{self, SERVICE_TYPE as QUICKSHARE_SERVICE};
 use crate::service::{run, DaemonConfig};
 
@@ -116,11 +116,11 @@ pub async fn execute() -> Result<()> {
             trust_first,
         } => {
             let addr = resolve_native(&to).await?;
-            let trust = trust_for(&addr, trust_first)?;
+            let trust = crate::trust::trust_for(&addr, trust_first)?;
             let report =
                 native::send_files(addr, &device_name(), &files, pin.as_deref(), trust).await?;
             if trust_first {
-                remember(&addr, &report.fingerprint)?;
+                crate::trust::remember(&addr, &report.fingerprint)?;
             }
             println!(
                 "sent {} file(s), {} bytes, fingerprint {}",
@@ -205,60 +205,6 @@ async fn resolve_service(service: &str, to: &str) -> Result<SocketAddr> {
         .find(|peer| peer.instance == to || peer.txt.get("n").is_some_and(|name| name == to))
         .map(|peer| peer.addr)
         .ok_or_else(|| Error::NotFound(to.to_string()))
-}
-
-fn trust_for(addr: &SocketAddr, trust_first: bool) -> Result<Trust> {
-    if let Some(fingerprint) = remembered(addr) {
-        return Ok(Trust::Fingerprint(Some(fingerprint)));
-    }
-    if trust_first {
-        return Ok(Trust::Fingerprint(None));
-    }
-    Err(Error::Untrusted(format!(
-        "{addr} is not a remembered peer. Run again with --trust-first after checking the receiver's fingerprint."
-    )))
-}
-
-fn peers_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| Error::protocol("home directory is not set"))?;
-    let dir = home.join(".config").join("whoosh");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("known-peers"))
-}
-
-fn remembered(addr: &SocketAddr) -> Option<[u8; 32]> {
-    let path = peers_path().ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(saved) = parts.next() else { continue };
-        let Some(fingerprint) = parts.next() else {
-            continue;
-        };
-        if saved == addr.to_string() {
-            return parse_fingerprint(fingerprint);
-        }
-    }
-    None
-}
-
-fn remember(addr: &SocketAddr, fingerprint: &[u8; 32]) -> Result<()> {
-    let path = peers_path()?;
-    let mut lines = std::fs::read_to_string(&path).unwrap_or_default();
-    if !lines.is_empty() && !lines.ends_with('\n') {
-        lines.push('\n');
-    }
-    lines.push_str(&format!("{addr} {}\n", fingerprint_hex(fingerprint)));
-    std::fs::write(path, lines)?;
-    Ok(())
-}
-
-fn parse_fingerprint(text: &str) -> Option<[u8; 32]> {
-    let bytes = hex::decode(text).ok()?;
-    bytes.try_into().ok()
 }
 
 #[cfg(test)]

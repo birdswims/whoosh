@@ -18,5 +18,6 @@ pub mod quickshare;
 pub mod radio;
 pub mod sanitize;
 pub mod service;
+mod trust;
 
 pub use error::{Error, Result};
