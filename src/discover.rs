@@ -9,7 +9,7 @@
 //! interface: a proxy hostname is not a record Android Nearby will keep.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -365,8 +365,82 @@ fn confirm_registration(
 #[derive(Debug, Clone)]
 pub struct FoundPeer {
     pub instance: String,
+    pub fullname: String,
     pub addr: SocketAddr,
     pub txt: HashMap<String, String>,
+}
+
+pub enum PeerUpdate {
+    Resolved { via: &'static str, peer: FoundPeer },
+    Removed { fullname: String },
+}
+
+/// One mDNS browser for the whole time the app is open.
+///
+/// A fresh browse every couple of seconds misses devices that are still
+/// nearby, because the reply often arrives after the window closes.
+pub struct PeerBrowser {
+    daemon: ServiceDaemon,
+    events: tokio::sync::mpsc::UnboundedReceiver<PeerUpdate>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl PeerBrowser {
+    pub fn open(services: &[(&str, &'static str)]) -> Result<Self> {
+        let daemon = ServiceDaemon::new().map_err(|error| Error::protocol(error.to_string()))?;
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for (service_type, via) in services {
+            let receiver = match daemon.browse(service_type) {
+                Ok(receiver) => receiver,
+                Err(error) => {
+                    tracing::warn!(%error, service = service_type, "browse failed");
+                    continue;
+                }
+            };
+            let tx = tx.clone();
+            let via = *via;
+            tasks.push(tokio::spawn(async move {
+                while let Ok(event) = receiver.recv_async().await {
+                    let update = match event {
+                        ServiceEvent::ServiceResolved(info) => {
+                            convert(&info).map(|peer| PeerUpdate::Resolved { via, peer })
+                        }
+                        ServiceEvent::ServiceRemoved(_, fullname) => {
+                            Some(PeerUpdate::Removed { fullname })
+                        }
+                        _ => None,
+                    };
+                    let Some(update) = update else { continue };
+                    if tx.send(update).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        if tasks.is_empty() {
+            let _ = daemon.shutdown();
+            return Err(Error::protocol("mDNS browse did not start"));
+        }
+        Ok(Self {
+            daemon,
+            events,
+            tasks,
+        })
+    }
+
+    pub async fn recv(&mut self) -> Option<PeerUpdate> {
+        self.events.recv().await
+    }
+}
+
+impl Drop for PeerBrowser {
+    fn drop(&mut self) {
+        let _ = self.daemon.shutdown();
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 pub async fn browse(service_type: &str, wait: Duration) -> Result<Vec<FoundPeer>> {
@@ -384,13 +458,7 @@ pub async fn browse(service_type: &str, wait: Duration) -> Result<Vec<FoundPeer>
         match tokio::time::timeout(remaining, receiver.recv_async()).await {
             Ok(Ok(ServiceEvent::ServiceResolved(info))) => {
                 if let Some(peer) = convert(&info) {
-                    if peers
-                        .iter()
-                        .any(|existing: &FoundPeer| existing.addr == peer.addr)
-                    {
-                        continue;
-                    }
-                    peers.push(peer);
+                    upsert_peer(&mut peers, peer);
                 }
             }
             Ok(Ok(_)) => {}
@@ -399,6 +467,27 @@ pub async fn browse(service_type: &str, wait: Duration) -> Result<Vec<FoundPeer>
     }
     let _ = daemon.shutdown();
     Ok(peers)
+}
+
+fn upsert_peer(peers: &mut Vec<FoundPeer>, peer: FoundPeer) {
+    let index = peers
+        .iter()
+        .position(|existing| same_instance(existing, &peer));
+    let Some(index) = index else {
+        peers.push(peer);
+        return;
+    };
+    if addr_rank(peer.addr.ip()) <= addr_rank(peers[index].addr.ip()) {
+        peers[index] = peer;
+    }
+}
+
+fn same_instance(existing: &FoundPeer, peer: &FoundPeer) -> bool {
+    let instance = peer.instance.trim();
+    if !instance.is_empty() && existing.instance.eq_ignore_ascii_case(instance) {
+        return true;
+    }
+    existing.addr == peer.addr
 }
 
 fn convert(info: &ServiceInfo) -> Option<FoundPeer> {
@@ -410,26 +499,67 @@ fn convert(info: &ServiceInfo) -> Option<FoundPeer> {
             txt.insert(key.to_string(), value.to_string());
         }
     }
-    let instance = info
-        .get_fullname()
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let fullname = info.get_fullname().to_string();
+    let instance = fullname.split('.').next().unwrap_or("").to_string();
     Some(FoundPeer {
         instance,
+        fullname,
         addr,
         txt,
     })
 }
 
+/// Prefer a normal Wi-Fi address over a link-local one.
+///
+/// Address sets arrive in a `HashSet`, whose iteration order changes between
+/// browses. Ranking the address keeps one device on one row.
+pub(crate) fn addr_rank(addr: IpAddr) -> u8 {
+    match addr {
+        IpAddr::V4(ip) if is_lan_v4(ip) => 0,
+        IpAddr::V4(ip) if is_other_unicast_v4(ip) => 1,
+        IpAddr::V6(ip) if is_ula(ip) => 2,
+        IpAddr::V6(ip) if is_global_v6(ip) => 3,
+        IpAddr::V4(ip) if ip.is_link_local() => 4,
+        IpAddr::V6(ip) if ip.is_unicast_link_local() => 5,
+        _ => 6,
+    }
+}
+
+fn is_lan_v4(ip: Ipv4Addr) -> bool {
+    let [first, second, _, _] = ip.octets();
+    first == 10
+        || (first == 172 && (16..=31).contains(&second))
+        || (first == 192 && second == 168)
+        || (first == 100 && (64..=127).contains(&second))
+}
+
+fn is_other_unicast_v4(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && !ip.is_link_local()
+        && !is_lan_v4(ip)
+}
+
+fn is_ula(ip: Ipv6Addr) -> bool {
+    ip.octets()[0] & 0xfe == 0xfc
+}
+
+fn is_global_v6(ip: Ipv6Addr) -> bool {
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_multicast()
+        && !ip.is_unicast_link_local()
+        && !is_ula(ip)
+}
+
 fn pick_addr(addresses: &std::collections::HashSet<IpAddr>, port: u16) -> Option<SocketAddr> {
-    let preferred = addresses
+    addresses
         .iter()
         .copied()
-        .find(|addr| !addr.is_loopback() && !addr.is_multicast())
-        .or_else(|| addresses.iter().copied().next())?;
-    Some(SocketAddr::new(preferred, port))
+        .min_by_key(|addr| (addr_rank(*addr), *addr))
+        .map(|addr| SocketAddr::new(addr, port))
 }
 
 fn mdns_hostname() -> String {
@@ -741,5 +871,52 @@ mod tests {
         let mut bytes = output.stdout;
         bytes.extend_from_slice(&output.stderr);
         bytes
+    }
+
+    #[test]
+    fn pick_addr_prefers_the_lan_address() {
+        use std::collections::HashSet;
+        use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+        let mut addresses = HashSet::new();
+        addresses.insert(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)));
+        addresses.insert(IpAddr::V4(Ipv4Addr::new(169, 254, 4, 5)));
+        addresses.insert(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)));
+        let picked = super::pick_addr(&addresses, 5353).unwrap();
+        assert_eq!(picked, SocketAddr::from(([192, 168, 1, 20], 5353)));
+    }
+
+    #[test]
+    fn one_instance_keeps_its_lan_address() {
+        use super::FoundPeer;
+        use std::collections::HashMap;
+
+        let link_local = FoundPeer {
+            instance: "Phone".into(),
+            fullname: "Phone._airdrop._tcp.local.".into(),
+            addr: "[fe80::1]:8770".parse().unwrap(),
+            txt: HashMap::new(),
+        };
+        let lan = FoundPeer {
+            instance: "phone".into(),
+            fullname: "phone._airdrop._tcp.local.".into(),
+            addr: "192.168.1.5:8770".parse().unwrap(),
+            txt: HashMap::new(),
+        };
+        let mut peers = vec![link_local];
+        super::upsert_peer(&mut peers, lan);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addr, "192.168.1.5:8770".parse().unwrap());
+        super::upsert_peer(
+            &mut peers,
+            FoundPeer {
+                instance: "phone".into(),
+                fullname: "phone._airdrop._tcp.local.".into(),
+                addr: "[fe80::2]:8770".parse().unwrap(),
+                txt: HashMap::new(),
+            },
+        );
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addr, "192.168.1.5:8770".parse().unwrap());
     }
 }
