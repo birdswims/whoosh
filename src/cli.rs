@@ -85,6 +85,8 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         seconds: u64,
     },
+    /// Speak the JSON control channel used by the macOS app.
+    App,
 }
 
 pub async fn execute() -> Result<()> {
@@ -185,6 +187,7 @@ pub async fn execute() -> Result<()> {
             }
             Ok(())
         }
+        Command::App => crate::appctl::run().await,
     }
 }
 
@@ -225,5 +228,6 @@ mod tests {
         ])
         .is_ok());
         assert!(Cli::try_parse_from(["whoosh", "discover"]).is_ok());
+        assert!(Cli::try_parse_from(["whoosh", "app"]).is_ok());
     }
 }

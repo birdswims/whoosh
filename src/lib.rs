@@ -5,6 +5,8 @@
 #![deny(unsafe_code)]
 
 pub mod airdrop;
+#[allow(unsafe_code)]
+mod appctl;
 pub mod approve;
 pub mod cli;
 pub mod discover;
