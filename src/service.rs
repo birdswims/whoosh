@@ -161,6 +161,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             max_file_bytes: config.max_file_bytes,
             approve: config.approve.clone(),
             device_type: DEVICE_LAPTOP,
+            on_saved: None,
         };
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
@@ -185,6 +186,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             sort_media: config.sort_media,
             max_file_bytes: config.max_file_bytes,
             approve: config.approve.clone(),
+            on_saved: None,
         });
         let cancel_air = cancel.clone();
         let primary = airdrop.clone();

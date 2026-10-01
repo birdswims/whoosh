@@ -31,6 +31,8 @@ pub struct QuickshareConfig {
     pub max_file_bytes: u64,
     pub approve: Approval,
     pub device_type: u8,
+    /// Called after files are saved. The command-line receiver leaves this empty.
+    pub on_saved: Option<crate::note::SavedHook>,
 }
 
 impl QuickshareConfig {
@@ -42,6 +44,7 @@ impl QuickshareConfig {
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),
             device_type: DEVICE_LAPTOP,
+            on_saved: None,
         }
     }
 }
@@ -51,6 +54,7 @@ pub struct TransferDone {
     pub accepted: bool,
     pub files: Vec<PathBuf>,
     pub bytes: u64,
+    pub peer: String,
 }
 
 pub async fn serve(
@@ -65,11 +69,26 @@ pub async fn serve(
                 tracing::debug!(%peer, "quick share connection");
                 let config = config.clone();
                 tokio::spawn(async move {
-                    match handle_server(socket, config).await {
-                        Ok(done) if done.accepted => println!(
-                            "quickshare saved {} file(s), {} bytes",
-                            done.files.len(), done.bytes
-                        ),
+                    match handle_server(socket, config.clone()).await {
+                        Ok(done) if done.accepted => {
+                            if let Some(hook) = &config.on_saved {
+                                hook(crate::note::SavedNote {
+                                    peer: done.peer.clone(),
+                                    files: done.files.len(),
+                                    bytes: done.bytes,
+                                    paths: done
+                                        .files
+                                        .iter()
+                                        .map(|path| path.display().to_string())
+                                        .collect(),
+                                });
+                            }
+                            println!(
+                                "quickshare saved {} file(s), {} bytes",
+                                done.files.len(),
+                                done.bytes
+                            );
+                        }
                         Ok(_) => {},
                         Err(error) => tracing::warn!(%peer, %error, "quick share session failed"),
                     }
@@ -237,6 +256,7 @@ async fn send_prepared(
         accepted: true,
         files: Vec::new(),
         bytes,
+        peer: String::new(),
     })
 }
 
@@ -358,9 +378,7 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
     }
     drop(outgoing);
     let _ = writer_task.await;
-    if !done.accepted {
-        return Ok(done);
-    }
+    done.peer = peer_name;
     Ok(done)
 }
 

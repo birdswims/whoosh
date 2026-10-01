@@ -12,6 +12,7 @@ pub mod error;
 pub mod mime;
 pub mod native;
 pub mod net;
+mod note;
 pub mod paths;
 pub mod quickshare;
 #[allow(unsafe_code)]

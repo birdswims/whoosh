@@ -23,6 +23,8 @@ pub struct AirdropConfig {
     pub sort_media: bool,
     pub max_file_bytes: u64,
     pub approve: Approval,
+    /// Called after an upload is unpacked. The command-line receiver leaves this empty.
+    pub on_saved: Option<crate::note::SavedHook>,
 }
 
 impl AirdropConfig {
@@ -34,6 +36,7 @@ impl AirdropConfig {
             sort_media: false,
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),
+            on_saved: None,
         }
     }
 }
@@ -41,6 +44,7 @@ impl AirdropConfig {
 #[derive(Default)]
 struct Pending {
     accepted: bool,
+    peer: String,
 }
 
 pub struct AirdropReceiver {
@@ -235,10 +239,13 @@ impl AirdropReceiver {
             Err(_) => false,
         };
         if !allow {
-            *self.pending.lock().await = Pending { accepted: false };
+            *self.pending.lock().await = Pending::default();
             return (409, "Conflict", "text/plain", b"declined".to_vec());
         }
-        *self.pending.lock().await = Pending { accepted: true };
+        *self.pending.lock().await = Pending {
+            accepted: true,
+            peer: ask.sender_name.clone(),
+        };
         println!("airdrop    accepted; waiting for the sender to upload");
         match protocol::ask_response(&self.config.name, &self.config.model) {
             Ok(body) => (200, "OK", "application/octet-stream", body),
@@ -276,7 +283,7 @@ impl AirdropReceiver {
         ) {
             Ok(entries) => entries,
             Err(error) => {
-                *self.pending.lock().await = Pending { accepted: false };
+                *self.pending.lock().await = Pending::default();
                 return (
                     400,
                     "Bad Request",
@@ -287,6 +294,7 @@ impl AirdropReceiver {
         };
         let count = entries.len();
         let bytes: usize = entries.iter().map(|entry| entry.bytes.len()).sum();
+        let mut paths = Vec::with_capacity(entries.len());
         for entry in entries {
             let (kind, mime) = sniff(&entry.bytes, &entry.name);
             let _ = mime;
@@ -310,8 +318,18 @@ impl AirdropReceiver {
                     error.to_string().into_bytes(),
                 );
             }
+            paths.push(dest.display().to_string());
         }
-        *self.pending.lock().await = Pending { accepted: false };
+        let peer = std::mem::take(&mut self.pending.lock().await.peer);
+        *self.pending.lock().await = Pending::default();
+        if let Some(hook) = &self.config.on_saved {
+            hook(crate::note::SavedNote {
+                peer: peer.clone(),
+                files: count,
+                bytes: bytes as u64,
+                paths,
+            });
+        }
         println!(
             "airdrop    saved {count} file(s), {bytes} bytes, to {}",
             self.config.dir.display()
