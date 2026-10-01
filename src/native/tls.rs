@@ -45,6 +45,18 @@ pub fn fingerprint(der: &[u8]) -> [u8; 32] {
     Sha256::digest(der).into()
 }
 
+/// Rebuild a saved device identity. The key bytes are PKCS#8, which is what
+/// [`generate_identity`] writes.
+pub fn identity_from_der(cert: Vec<u8>, key: Vec<u8>) -> IdentityCert {
+    install_crypto();
+    let fingerprint = fingerprint(&cert);
+    IdentityCert {
+        cert_der: CertificateDer::from(cert),
+        key_der: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+        fingerprint,
+    }
+}
+
 pub fn fingerprint_hex(bytes: &[u8; 32]) -> String {
     hex::encode(bytes)
 }

@@ -70,7 +70,7 @@ impl NativeListener {
         Self::bind_with(addr, name, pin, identity)
     }
 
-    fn bind_with(
+    pub(crate) fn bind_with(
         addr: SocketAddr,
         name: impl Into<String>,
         pin: Option<String>,
