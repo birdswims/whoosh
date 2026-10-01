@@ -18,6 +18,19 @@ whoosh --help
 
 `cargo test --all-targets` runs the suite. Continuous integration runs that on Linux, macOS, and Windows.
 
+## macOS app
+
+The native macOS app sends and receives with other Whoosh computers, Android Quick Share, and AirDrop. It installs from a disk image:
+
+```bash
+scripts/macos-dmg.sh
+open dist/Whoosh.dmg
+```
+
+Drag Whoosh to Applications. macOS asks for Local Network access the first time so nearby devices can be found. Received files go to `~/Whoosh`. The certificate shown in Settings stays the same across launches; compare it before trusting another computer.
+
+`whoosh app` is the control channel the app uses. The commands above still work from a terminal.
+
 ## Receive
 
 ```bash
