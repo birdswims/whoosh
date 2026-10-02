@@ -154,11 +154,13 @@ private struct SendCard: View {
             dropWell
             if !model.files.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
+                    HStack(alignment: .top, spacing: 8) {
                         ForEach(model.files) { file in
                             FileChip(file: file)
                         }
                     }
+                    .padding(.top, 2)
+                    .padding(.trailing, 4)
                 }
             }
             Spacer(minLength: 4)
@@ -235,27 +237,71 @@ private struct FileChip: View {
     @Environment(AppModel.self) private var model
     var file: SendFile
 
+    private var kind: MediaThumbnail.Kind? {
+        MediaThumbnail.kind(of: file.path)
+    }
+
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbolName(for: file.name))
-                .font(.system(size: 11))
+        VStack(spacing: 5) {
+            preview
             Text(file.name)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .frame(maxWidth: 140, alignment: .leading)
+                .truncationMode(.middle)
+                .frame(width: MediaThumbnail.side + 8)
+        }
+        .help(file.name)
+    }
+
+    private var preview: some View {
+        ZStack(alignment: .topTrailing) {
+            ZStack {
+                if let image = model.thumbnails[file.path] {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: symbolName(for: file.name))
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                if kind == .video, model.thumbnails[file.path] != nil {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 16, height: 16)
+                        .background(Circle().fill(.black.opacity(0.5)))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                        .padding(5)
+                }
+            }
+            .frame(width: MediaThumbnail.side, height: MediaThumbnail.side)
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
+            )
+            .accessibilityHidden(true)
+
             Button {
                 model.removeFile(file)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 16, height: 16)
+                    .background(Circle().fill(Theme.card))
+                    .overlay(Circle().strokeBorder(Theme.hairline, lineWidth: 1))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .offset(x: 5, y: -5)
             .help("Remove")
+            .accessibilityLabel("Remove \(file.name)")
         }
-        .font(.system(size: 12))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .padding(.top, 6)
+        .padding(.trailing, 6)
     }
 }
 

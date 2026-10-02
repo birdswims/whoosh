@@ -79,7 +79,9 @@ enum Snapshot {
         model.files = [
             SendFile(path: "/tmp/vacation.jpg", name: "vacation.jpg"),
             SendFile(path: "/tmp/clip.mp4", name: "clip.mp4"),
+            SendFile(path: "/tmp/notes.txt", name: "notes.txt"),
         ]
+        attachPreviews(model)
         model.activity = [
             ActivityItem(id: "1", direction: "in", state: "done", title: "Received 2 files", detail: "from Pixel", peer: "Pixel", via: "quickshare", bytes: 18_000_000, paths: ["/tmp/a.jpg"]),
             ActivityItem(id: "2", direction: "out", state: "working", title: "Sending 1 file", detail: "to Office Mac", peer: "Office Mac", via: "whoosh", bytes: nil, paths: []),
@@ -121,6 +123,19 @@ enum Snapshot {
         model.engineDown = true
         model.engineError = "The Whoosh engine is missing from the app."
         return model
+    }
+}
+
+private func attachPreviews(_ model: AppModel) {
+    let scale = NSScreen.main?.backingScaleFactor ?? 2
+    var images: [String: NSImage] = [:]
+    for path in model.files.map(\.path) where FileManager.default.fileExists(atPath: path) {
+        if let image = MediaThumbnail.make(path: path, scale: scale) {
+            images[path] = MediaThumbnail.thumbnail(image)
+        }
+    }
+    if !images.isEmpty {
+        model.thumbnails = images
     }
 }
 

@@ -14,6 +14,14 @@ final class AppModel {
     private var respondedOffers: Set<String> = []
     private var offerQueue: [Offer] = []
     private var bannerToken = 0
+    private var thumbnailLoads: Set<String> = []
+    private let thumbnailQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "whoosh.thumbnails"
+        queue.maxConcurrentOperationCount = 4
+        queue.qualityOfService = .utility
+        return queue
+    }()
 
     var version = ""
     var receiving = false
@@ -33,6 +41,7 @@ final class AppModel {
     var peers: [Peer] = []
     var selectedPeerID: String?
     var files: [SendFile] = []
+    var thumbnails: [String: NSImage] = [:]
     var outgoingPin = ""
     var activity: [ActivityItem] = []
     var currentOffer: Offer?
@@ -171,6 +180,7 @@ final class AppModel {
     func addURLs(_ urls: [URL]) {
         var seen = Set(files.map(\.path))
         var next = files
+        var added: [String] = []
         var truncated = false
         for url in urls {
             for file in expand(url) {
@@ -181,10 +191,12 @@ final class AppModel {
                 let path = file.standardizedFileURL.path
                 if seen.insert(path).inserted {
                     next.append(SendFile(path: path, name: file.lastPathComponent))
+                    added.append(path)
                 }
             }
         }
         files = next
+        loadThumbnails(added)
         if truncated {
             showBanner("Whoosh sends up to 500 files at a time.")
         }
@@ -192,6 +204,7 @@ final class AppModel {
 
     func removeFile(_ file: SendFile) {
         files.removeAll { $0.path == file.path }
+        thumbnails.removeValue(forKey: file.path)
     }
 
     func select(_ peer: Peer) {
@@ -436,6 +449,30 @@ final class AppModel {
     private func nextID() -> String {
         nextIdentifier += 1
         return String(nextIdentifier)
+    }
+
+    private func loadThumbnails(_ paths: [String]) {
+        let pending = paths.filter { path in
+            guard MediaThumbnail.kind(of: path) != nil else { return false }
+            guard thumbnails[path] == nil else { return false }
+            return thumbnailLoads.insert(path).inserted
+        }
+        guard !pending.isEmpty else { return }
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        for path in pending {
+            thumbnailQueue.addOperation {
+                let image = MediaThumbnail.make(path: path, scale: scale)
+                DispatchQueue.main.async {
+                    AppModel.shared?.storeThumbnail(path, image)
+                }
+            }
+        }
+    }
+
+    private func storeThumbnail(_ path: String, _ image: CGImage?) {
+        thumbnailLoads.remove(path)
+        guard let image, files.contains(where: { $0.path == path }) else { return }
+        thumbnails[path] = MediaThumbnail.thumbnail(image)
     }
 
     private func expand(_ url: URL) -> [URL] {
