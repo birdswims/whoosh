@@ -29,6 +29,12 @@ open dist/Whoosh.dmg
 
 Drag Whoosh to Applications. macOS asks for Local Network access the first time so nearby devices can be found. Received files go to `~/Whoosh`. The certificate shown in Settings stays the same across launches; compare it before trusting another computer.
 
+The macOS app sends AirDrop files directly to the device selected in Whoosh,
+using the Mac's AirDrop transfer service and identity. No second device picker
+opens. This path uses runtime-loaded Sharing.framework APIs and reports an
+error if they are unavailable. The command-line AirDrop sender uses the separate
+legacy HTTPS implementation and is not verified with iPadOS 27.
+
 `whoosh app` is the control channel the app uses. The commands above still work from a terminal.
 
 ## Receive

@@ -237,6 +237,10 @@ private struct SendCard: View {
         guard let peer = model.selectedPeer else {
             return "Choose a device nearby."
         }
+        if model.sending {
+            return model.activity.first(where: { $0.direction == "out" && $0.state == "working" })?.detail
+                ?? "Preparing transfer…"
+        }
         if peer.via == "whoosh", !peer.trusted {
             return "You confirm this device’s fingerprint before the first send."
         }
@@ -341,7 +345,6 @@ private struct NearbyCard: View {
                     LazyVStack(spacing: 2) {
                         ForEach(model.peers) { peer in
                             PeerRow(peer: peer, selected: peer.id == model.selectedPeerID)
-                                .onTapGesture { model.select(peer) }
                         }
                     }
                 }
@@ -352,40 +355,50 @@ private struct NearbyCard: View {
 }
 
 private struct PeerRow: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var scheme
     var peer: Peer
     var selected: Bool
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(peer.name)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                Text(peer.detail)
-                    .font(.system(size: 11, design: .monospaced))
+        // The window is a file drop target. A tap gesture on this row loses
+        // that click, so choosing an iPhone never enabled Send.
+        Button {
+            model.select(peer)
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(peer.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(peer.detail)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text(protocolLabel(peer.via))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                Circle()
+                    .fill(selected ? Theme.signal(scheme) : Color.clear)
+                    .frame(width: 6, height: 6)
             }
-            Spacer(minLength: 8)
-            Text(protocolLabel(peer.via))
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(Color.primary.opacity(0.06)))
-            Circle()
-                .fill(selected ? Theme.signal(scheme) : Color.clear)
-                .frame(width: 6, height: 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? Color.primary.opacity(0.07) : (hovering ? Color.primary.opacity(0.04) : Color.clear))
+            )
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(selected ? Color.primary.opacity(0.07) : (hovering ? Color.primary.opacity(0.04) : Color.clear))
-        )
-        .contentShape(Rectangle())
+        .buttonStyle(RowButtonStyle())
         .onHover { inside in
             hovering = inside
             if inside {
@@ -394,8 +407,6 @@ private struct PeerRow: View {
                 NSCursor.arrow.set()
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(peer.name), \(protocolLabel(peer.via))")
     }
 }
@@ -412,6 +423,14 @@ struct PrimaryButton: View {
         .buttonStyle(CapsuleButtonStyle(enabled: enabled))
         .allowsHitTesting(enabled)
         .accessibilityAddTraits(enabled ? [] : .isStaticText)
+    }
+}
+
+/// Leaves the row colors alone. The plain style repaints the label in the accent color.
+private struct RowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }
 

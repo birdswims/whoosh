@@ -2,8 +2,11 @@
 //!
 //! On macOS the advertiser is `dns-sd`, which talks to mDNSResponder. That
 //! process already has Local Network permission. AirDrop is registered with
-//! `-includeAWDL` so the AWDL address stays in the answer. The iPhone share
-//! sheet lists `_companion-link._tcp`. Whoosh registers that type on its own
+//! `-includeAWDL` so the AWDL address stays in the answer. Browsing uses the
+//! same flag: an iPhone announces AirDrop only on AWDL, and only after a
+//! sender asks it to. A userspace mDNS socket does not receive that
+//! announcement. The iPhone share sheet lists `_companion-link._tcp`.
+//! Whoosh registers that type on its own
 //! host (`whoosh-<port>.local`) at the Wi-Fi address, so the row is separate
 //! from the Mac's computer name. Quick Share is registered only on the LAN
 //! interface: a proxy hostname is not a record Android Nearby will keep.
@@ -15,6 +18,20 @@ use std::time::Duration;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::error::{Error, Result};
+
+mod awdl;
+
+/// Drains the main-thread run loop so AirDrop discovery callbacks can run.
+#[cfg(target_os = "macos")]
+pub(crate) fn pump_main_run_loop(seconds: f64) {
+    awdl::pump_main_run_loop(seconds);
+}
+
+/// Wakes the main-thread run loop so the process can exit.
+#[cfg(target_os = "macos")]
+pub(crate) fn stop_main_run_loop() {
+    awdl::stop_main_run_loop();
+}
 
 pub struct Advertisement {
     backend: Backend,
@@ -190,7 +207,7 @@ fn check_interface(interface: &str) -> Result<()> {
     Ok(())
 }
 
-fn dns_sd_type(service_type: &str) -> Result<String> {
+pub(crate) fn dns_sd_type(service_type: &str) -> Result<String> {
     let trimmed = service_type.trim_matches('.');
     let (name, _) = trimmed
         .rsplit_once('.')
@@ -368,6 +385,10 @@ pub struct FoundPeer {
     pub fullname: String,
     pub addr: SocketAddr,
     pub txt: HashMap<String, String>,
+    /// Original TXT bytes. `txt` drops a value that is not UTF-8, which is
+    /// how some phones send the Quick Share name record.
+    pub txt_raw: HashMap<String, Vec<u8>>,
+    pub hostname: String,
 }
 
 pub enum PeerUpdate {
@@ -379,10 +400,13 @@ pub enum PeerUpdate {
 ///
 /// A fresh browse every couple of seconds misses devices that are still
 /// nearby, because the reply often arrives after the window closes.
+/// AirDrop is browsed with `dns-sd -includeAWDL` on macOS so an iPhone
+/// set to Everyone is visible.
 pub struct PeerBrowser {
     daemon: ServiceDaemon,
     events: tokio::sync::mpsc::UnboundedReceiver<PeerUpdate>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    awdl_pids: Vec<u32>,
 }
 
 impl PeerBrowser {
@@ -390,7 +414,20 @@ impl PeerBrowser {
         let daemon = ServiceDaemon::new().map_err(|error| Error::protocol(error.to_string()))?;
         let (tx, events) = tokio::sync::mpsc::unbounded_channel();
         let mut tasks = Vec::new();
+        let mut awdl_pids = Vec::new();
         for (service_type, via) in services {
+            if awdl::uses_system_browse(service_type) {
+                match awdl::start_browse(service_type, via, tx.clone()) {
+                    Ok(browse) => {
+                        awdl_pids.push(browse.pid);
+                        tasks.push(browse.task);
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, service = service_type, "awdl browse failed");
+                    }
+                }
+            }
             let receiver = match daemon.browse(service_type) {
                 Ok(receiver) => receiver,
                 Err(error) => {
@@ -426,6 +463,7 @@ impl PeerBrowser {
             daemon,
             events,
             tasks,
+            awdl_pids,
         })
     }
 
@@ -436,6 +474,9 @@ impl PeerBrowser {
 
 impl Drop for PeerBrowser {
     fn drop(&mut self) {
+        for pid in &self.awdl_pids {
+            awdl::interrupt(*pid);
+        }
         let _ = self.daemon.shutdown();
         for task in &self.tasks {
             task.abort();
@@ -443,7 +484,49 @@ impl Drop for PeerBrowser {
     }
 }
 
+pub fn unnamed_airdrop_instance(instance: &str) -> bool {
+    awdl::unnamed_instance(instance)
+}
+
+pub fn parse_peer_addr(value: &str) -> Option<SocketAddr> {
+    awdl::parse_peer_addr(value)
+}
+
 pub async fn browse(service_type: &str, wait: Duration) -> Result<Vec<FoundPeer>> {
+    if awdl::uses_system_browse(service_type) {
+        return browse_awdl(service_type, wait).await;
+    }
+    userspace_browse(service_type, wait).await
+}
+
+#[cfg(target_os = "macos")]
+async fn browse_awdl(service_type: &str, wait: Duration) -> Result<Vec<FoundPeer>> {
+    // Held across the name lookup. Dropping it first makes the phone leave
+    // AWDL before Discover can ask who it is.
+    let wake = awdl::WakeGuard::hold();
+    let service = service_type.to_string();
+    let mut peers = tokio::task::spawn_blocking(move || awdl::collect(&service, wait))
+        .await
+        .map_err(|error| Error::protocol(error.to_string()))?;
+    for peer in &mut peers {
+        let named = peer.txt.get("name").is_some_and(|name| !name.is_empty());
+        if named || !awdl::unnamed_instance(&peer.instance) {
+            continue;
+        }
+        if let Some(name) = crate::airdrop::discover_receiver_name(peer.addr).await {
+            peer.txt.insert("name".into(), name);
+        }
+    }
+    drop(wake);
+    Ok(peers)
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn browse_awdl(_service_type: &str, _wait: Duration) -> Result<Vec<FoundPeer>> {
+    Ok(Vec::new())
+}
+
+async fn userspace_browse(service_type: &str, wait: Duration) -> Result<Vec<FoundPeer>> {
     let daemon = ServiceDaemon::new().map_err(|error| Error::protocol(error.to_string()))?;
     let receiver = daemon
         .browse(service_type)
@@ -494,18 +577,29 @@ fn convert(info: &ServiceInfo) -> Option<FoundPeer> {
     let port = info.get_port();
     let addr = pick_addr(info.get_addresses(), port)?;
     let mut txt = HashMap::new();
-    for key in ["n", "v", "fp", "flags"] {
-        if let Some(value) = info.get_property_val_str(key) {
-            txt.insert(key.to_string(), value.to_string());
+    let mut txt_raw = HashMap::new();
+    for prop in info.get_properties().iter() {
+        let key = prop.key().to_ascii_lowercase();
+        let Some(bytes) = prop.val() else {
+            continue;
+        };
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if !text.is_empty() {
+                txt.insert(key.clone(), text.to_string());
+            }
         }
+        txt_raw.insert(key, bytes.to_vec());
     }
     let fullname = info.get_fullname().to_string();
     let instance = fullname.split('.').next().unwrap_or("").to_string();
+    let hostname = info.get_hostname().to_string();
     Some(FoundPeer {
         instance,
         fullname,
         addr,
         txt,
+        txt_raw,
+        hostname,
     })
 }
 
@@ -896,12 +990,16 @@ mod tests {
             fullname: "Phone._airdrop._tcp.local.".into(),
             addr: "[fe80::1]:8770".parse().unwrap(),
             txt: HashMap::new(),
+            txt_raw: HashMap::new(),
+            hostname: String::new(),
         };
         let lan = FoundPeer {
             instance: "phone".into(),
             fullname: "phone._airdrop._tcp.local.".into(),
             addr: "192.168.1.5:8770".parse().unwrap(),
             txt: HashMap::new(),
+            txt_raw: HashMap::new(),
+            hostname: String::new(),
         };
         let mut peers = vec![link_local];
         super::upsert_peer(&mut peers, lan);
@@ -914,6 +1012,8 @@ mod tests {
                 fullname: "phone._airdrop._tcp.local.".into(),
                 addr: "[fe80::2]:8770".parse().unwrap(),
                 txt: HashMap::new(),
+                txt_raw: HashMap::new(),
+                hostname: String::new(),
             },
         );
         assert_eq!(peers.len(), 1);

@@ -50,6 +50,92 @@ fn allow_awdl_receive(socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Connect to an AirDrop peer.
+///
+/// A scoped link-local destination is on AWDL. macOS does not send to that
+/// interface when only the destination carries a scope id. The socket has to
+/// be bound to the interface as well.
+pub async fn connect_airdrop(addr: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+    let socket = if addr.is_ipv6() {
+        tokio::net::TcpSocket::new_v6()?
+    } else {
+        tokio::net::TcpSocket::new_v4()?
+    };
+    #[cfg(target_os = "macos")]
+    allow_awdl_receive(&socket)?;
+    #[cfg(target_os = "macos")]
+    if let SocketAddr::V6(scoped) = addr {
+        if scoped.scope_id() != 0 && scoped.ip().is_unicast_link_local() {
+            return connect_scoped(socket, scoped).await;
+        }
+    }
+    socket.connect(addr).await
+}
+
+#[cfg(target_os = "macos")]
+async fn connect_scoped(
+    socket: tokio::net::TcpSocket,
+    dest: SocketAddrV6,
+) -> std::io::Result<tokio::net::TcpStream> {
+    bind_socket_to_interface(&socket, dest.scope_id())?;
+    let local = local_link_local(dest.scope_id()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no link-local address on the AirDrop interface",
+        )
+    })?;
+    socket.bind(local)?;
+    socket.connect(SocketAddr::V6(dest)).await
+}
+
+// `IPV6_BOUND_IF` is in the macOS SDK headers and not re-exported by libc.
+#[cfg(target_os = "macos")]
+const IPV6_BOUND_IF: libc::c_int = 125;
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn bind_socket_to_interface(socket: &tokio::net::TcpSocket, index: u32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let index = index as libc::c_uint;
+    // SAFETY: socket owns a valid descriptor and index is a live c_uint whose
+    // size matches optlen. setsockopt copies the value before returning.
+    let status = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            IPV6_BOUND_IF,
+            (&index as *const libc::c_uint).cast(),
+            std::mem::size_of_val(&index) as libc::socklen_t,
+        )
+    };
+    if status != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn local_link_local(scope_id: u32) -> Option<SocketAddr> {
+    let interfaces = if_addrs::get_if_addrs().ok()?;
+    interfaces.into_iter().find_map(|interface| {
+        let if_addrs::IfAddr::V6(address) = interface.addr else {
+            return None;
+        };
+        if !address.ip.is_unicast_link_local() {
+            return None;
+        }
+        let index = interface_index(&interface.name)?;
+        if index != scope_id {
+            return None;
+        }
+        Some(SocketAddr::V6(SocketAddrV6::new(
+            address.ip, 0, 0, scope_id,
+        )))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceV4 {
     pub name: String,
@@ -349,9 +435,10 @@ mod tests {
             for addr in ["127.0.0.1:0", "[::1]:0"] {
                 let listener = super::bind_airdrop_listener(addr.parse().unwrap()).unwrap();
                 assert_eq!(recv_anyif(&listener), 1);
-                let mut sender = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+                let mut sender = super::connect_airdrop(listener.local_addr().unwrap())
                     .await
                     .unwrap();
+                assert_eq!(recv_anyif(&sender), 1);
                 let (mut receiver, _) = listener.accept().await.unwrap();
                 assert_eq!(recv_anyif(&receiver), 1);
                 sender.write_all(b"AWDL").await.unwrap();
@@ -362,6 +449,17 @@ mod tests {
         })
         .await
         .expect("AirDrop listener stalled");
+    }
+
+    #[tokio::test]
+    async fn local_airdrop_connect_does_not_need_awdl() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connected = super::connect_airdrop(addr).await.unwrap();
+        assert_eq!(
+            connected.peer_addr().unwrap(),
+            listener.local_addr().unwrap()
+        );
     }
 
     fn iface(name: &str, ip: [u8; 4]) -> InterfaceV4 {

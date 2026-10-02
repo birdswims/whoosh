@@ -13,7 +13,7 @@ mod wire;
 
 pub use ble::{wake_service_data, SERVICE_UUID};
 pub use endpoint::{
-    decode_b64, parse_instance_name, random_endpoint_id, service_instance_name, EndpointInfo,
-    DEVICE_LAPTOP, SERVICE_TYPE,
+    decode_b64, nearby_label, parse_instance_name, random_endpoint_id, service_instance_name,
+    EndpointInfo, DEVICE_LAPTOP, SERVICE_TYPE,
 };
 pub use session::{accept_one, send_paths, serve, QuickshareConfig, TransferDone};

@@ -90,21 +90,29 @@ pub fn parse_ask(body: &[u8]) -> Result<Ask> {
 
 pub fn ask_request(
     sender_name: &str,
+    sender_model: &str,
     sender_id: &str,
-    files: &[(String, String)],
+    files: &[(String, String, u64)],
 ) -> Result<Vec<u8>> {
+    let model = if sender_model.trim().is_empty() {
+        "Mac"
+    } else {
+        sender_model.trim()
+    };
     let mut root = Dictionary::new();
     root.insert(
         "SenderComputerName".into(),
         Value::String(sender_name.into()),
     );
     root.insert("BundleID".into(), Value::String("com.apple.finder".into()));
-    root.insert("SenderModelName".into(), Value::String("Whoosh".into()));
+    // iOS shows the accept prompt for a Mac model identifier. A made-up model
+    // name is dropped and the phone never asks the person to accept.
+    root.insert("SenderModelName".into(), Value::String(model.into()));
     root.insert("SenderID".into(), Value::String(sender_id.into()));
     root.insert("ConvertMediaFormats".into(), Value::Boolean(false));
     let entries = files
         .iter()
-        .map(|(name, mime)| {
+        .map(|(name, mime, size)| {
             let mut file = Dictionary::new();
             file.insert("FileName".into(), Value::String(name.clone()));
             file.insert(
@@ -113,7 +121,12 @@ pub fn ask_request(
             );
             file.insert("FileBomPath".into(), Value::String(format!("./{name}")));
             file.insert("FileIsDirectory".into(), Value::Boolean(false));
-            file.insert("ConvertMediaFormats".into(), Value::Boolean(false));
+            // Apple's file record uses an integer here, not a boolean.
+            file.insert("ConvertMediaFormats".into(), Value::Integer(0.into()));
+            file.insert(
+                "FileSize".into(),
+                Value::Integer(i64::try_from(*size).unwrap_or(i64::MAX).into()),
+            );
             Value::Dictionary(file)
         })
         .collect();
@@ -121,8 +134,41 @@ pub fn ask_request(
     write_plist(root)
 }
 
+/// What a receiver said in its Discover reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverReply {
+    pub name: Option<String>,
+    /// `IsAirDropable`. Absent when this iOS build does not send the key.
+    pub accepts: Option<bool>,
+}
+
+pub fn discover_reply(body: &[u8]) -> Option<DiscoverReply> {
+    let value = Value::from_reader(std::io::Cursor::new(body)).ok()?;
+    let dict = value.as_dictionary()?;
+    let name = dict
+        .get("ReceiverComputerName")
+        .and_then(Value::as_string)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let accepts = dict.get("IsAirDropable").and_then(plist_bool);
+    Some(DiscoverReply { name, accepts })
+}
+
+fn plist_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Boolean(flag) => Some(*flag),
+        Value::Integer(flag) => Some(flag.as_signed().unwrap_or(0) != 0),
+        _ => None,
+    }
+}
+
 pub fn discover_request() -> Result<Vec<u8>> {
     write_plist(Dictionary::new())
+}
+
+pub fn receiver_computer_name(body: &[u8]) -> Option<String> {
+    discover_reply(body)?.name
 }
 
 pub fn extract_upload(
@@ -161,15 +207,58 @@ mod tests {
         assert!(body.starts_with(b"bplist"));
         let ask = ask_request(
             "iPhone",
+            "Mac14,6",
             "abc",
-            &[("photo.jpg".into(), "image/jpeg".into())],
+            &[("photo.jpg".into(), "image/jpeg".into(), 4)],
         )
         .unwrap();
         let parsed = parse_ask(&ask).unwrap();
         assert_eq!(parsed.sender_name, "iPhone");
         assert_eq!(parsed.files[0].name, "photo.jpg");
+        let dict = plist::Value::from_reader(std::io::Cursor::new(&ask))
+            .unwrap()
+            .into_dictionary()
+            .unwrap();
+        assert_eq!(
+            dict.get("SenderModelName")
+                .and_then(plist::Value::as_string),
+            Some("Mac14,6")
+        );
+        let file = dict.get("Files").and_then(plist::Value::as_array).unwrap()[0]
+            .as_dictionary()
+            .unwrap();
+        assert_eq!(
+            file.get("FileSize")
+                .and_then(plist::Value::as_signed_integer),
+            Some(4)
+        );
+        assert_eq!(
+            file.get("ConvertMediaFormats")
+                .and_then(plist::Value::as_signed_integer),
+            Some(0)
+        );
+        let refused = {
+            let mut root = plist::Dictionary::new();
+            root.insert("IsAirDropable".into(), plist::Value::Boolean(false));
+            let mut buf = Vec::new();
+            plist::Value::Dictionary(root)
+                .to_writer_binary(&mut buf)
+                .unwrap();
+            buf
+        };
+        assert_eq!(
+            super::discover_reply(&refused),
+            Some(super::DiscoverReply {
+                name: None,
+                accepts: Some(false),
+            })
+        );
         assert!(ask_response("Harry", "Whoosh")
             .unwrap()
             .starts_with(b"bplist"));
+        assert_eq!(
+            super::receiver_computer_name(&body).as_deref(),
+            Some("Harry")
+        );
     }
 }

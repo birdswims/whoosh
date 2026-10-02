@@ -89,6 +89,62 @@ enum Command {
     App,
 }
 
+/// Runs the command on a worker thread.
+///
+/// On macOS the calling thread pumps the main dispatch queue. AirDrop
+/// discovery callbacks are delivered there, and a Tokio runtime parked on
+/// this thread never drains them. Each pass runs for a couple of seconds:
+/// shorter passes return before the phone has been asked to announce.
+pub fn launch() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (tx, rx) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        let outcome = execute().await;
+        let _ = tx.send(outcome);
+        #[cfg(target_os = "macos")]
+        crate::discover::stop_main_run_loop();
+    });
+
+    #[cfg(target_os = "macos")]
+    {
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    crate::discover::pump_main_run_loop(0.0);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    crate::discover::pump_main_run_loop(0.0);
+                    eprintln!("error: {error}");
+                    std::process::exit(1);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    eprintln!("error: stopped");
+                    std::process::exit(1);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    crate::discover::pump_main_run_loop(2.0);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    match rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: stopped");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub async fn execute() -> Result<()> {
     match Cli::parse().command {
         Command::Receive {
@@ -171,19 +227,31 @@ pub async fn execute() -> Result<()> {
             }
             println!("quick share");
             for peer in discover::browse(QUICKSHARE_SERVICE, wait).await? {
-                let name = peer
-                    .txt
-                    .get("n")
-                    .and_then(|value| {
-                        quickshare::EndpointInfo::decode(&quickshare::decode_b64(value).ok()?).ok()
-                    })
-                    .and_then(|info| info.name)
-                    .unwrap_or(peer.instance);
+                let name = quickshare::nearby_label(
+                    &peer.txt,
+                    peer.txt_raw.get("n").map(Vec::as_slice),
+                    &peer.instance,
+                    &peer.hostname,
+                );
                 println!("  {name}  {}", peer.addr);
             }
             println!("airdrop");
             for peer in discover::browse(crate::airdrop::SERVICE_TYPE, wait).await? {
-                println!("  {}  {}", peer.instance, peer.addr);
+                let recorded = peer
+                    .txt
+                    .get("name")
+                    .cloned()
+                    .filter(|name| !name.is_empty());
+                let name = if let Some(name) = recorded {
+                    name
+                } else if discover::unnamed_airdrop_instance(&peer.instance) {
+                    crate::airdrop::discover_receiver_name(peer.addr)
+                        .await
+                        .unwrap_or_else(|| "AirDrop device".into())
+                } else {
+                    peer.instance
+                };
+                println!("  {name}  {}", peer.addr);
             }
             Ok(())
         }

@@ -365,39 +365,40 @@ pub async fn send_tls(
     files: &[(String, Vec<u8>)],
     connector: tokio_rustls::TlsConnector,
 ) -> Result<()> {
-    let socket = tokio::net::TcpStream::connect(addr).await?;
-    let mut socket = connector
-        .connect(crate::airdrop::server_name(), socket)
-        .await
-        .map_err(|error| Error::crypto(error.to_string()))?;
-    post(
-        &mut socket,
-        "/Discover",
-        "application/octet-stream",
-        &protocol::discover_request()?,
+    send_tls_with_progress(addr, sender_name, files, connector, &|_| {}).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendProgress {
+    Connecting,
+    SecuringConnection,
+    Discovering,
+    RequestingAcceptance,
+    Uploading,
+}
+
+pub async fn send_tls_with_progress(
+    addr: std::net::SocketAddr,
+    sender_name: &str,
+    files: &[(String, Vec<u8>)],
+    connector: tokio_rustls::TlsConnector,
+    progress: &(dyn Fn(SendProgress) + Send + Sync),
+) -> Result<()> {
+    progress(SendProgress::Connecting);
+    let socket = connect_for_send(addr).await?;
+    progress(SendProgress::SecuringConnection);
+    let mut socket = timeout(
+        Duration::from_secs(8),
+        connector.connect(crate::airdrop::server_name(), socket),
     )
-    .await?;
-    let described: Vec<(String, String)> = files
-        .iter()
-        .map(|(name, bytes)| {
-            let (mime, _) = protocol::describe(name, bytes);
-            (name.clone(), mime)
-        })
-        .collect();
-    let ask = protocol::ask_request(sender_name, "whoosh", &described)?;
-    let response = post(&mut socket, "/Ask", "application/octet-stream", &ask).await?;
-    if response.status != 200 {
-        return Err(Error::Rejected(format!("ask status {}", response.status)));
-    }
-    let archive = protocol::build_upload(files)?;
-    let response = post(&mut socket, "/Upload", "application/x-cpio", &archive).await?;
-    if response.status != 200 {
-        return Err(Error::protocol(format!(
-            "upload status {}",
-            response.status
-        )));
-    }
-    Ok(())
+    .await
+    .map_err(|_| {
+        Error::protocol(
+            "AirDrop secure connection timed out before an acceptance request could be sent.",
+        )
+    })?
+    .map_err(|error| Error::crypto(error.to_string()))?;
+    send_session(&mut socket, addr, sender_name, files, progress).await
 }
 
 pub async fn send_plain(
@@ -405,47 +406,248 @@ pub async fn send_plain(
     sender_name: &str,
     files: &[(String, Vec<u8>)],
 ) -> Result<()> {
-    let mut socket = tokio::net::TcpStream::connect(addr).await?;
-    post(
-        &mut socket,
+    let mut socket = connect_for_send(addr).await?;
+    send_session(&mut socket, addr, sender_name, files, &|_| {}).await
+}
+
+async fn connect_for_send(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
+    match timeout(Duration::from_secs(8), crate::net::connect_airdrop(addr)).await {
+        Ok(Ok(socket)) => Ok(socket),
+        Ok(Err(error)) => Err(Error::protocol(format!(
+            "could not reach the AirDrop device ({error}). Keep it unlocked and nearby, with AirDrop set to Everyone for 10 Minutes."
+        ))),
+        Err(_) => Err(Error::protocol(
+            "could not reach the AirDrop device. Keep it unlocked and nearby, with AirDrop set to Everyone for 10 Minutes.",
+        )),
+    }
+}
+
+async fn send_session<S>(
+    socket: &mut S,
+    addr: std::net::SocketAddr,
+    sender_name: &str,
+    files: &[(String, Vec<u8>)],
+    progress: &(dyn Fn(SendProgress) + Send + Sync),
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Host `whoosh` is what this iPhone already answered Discover with.
+    // A scoped IPv6 zone in the header is not a legal Host value.
+    let host = "whoosh";
+    progress(SendProgress::Discovering);
+    let discover = timeout(Duration::from_secs(8), post(
+        socket,
         "/Discover",
+        host,
         "application/octet-stream",
         &protocol::discover_request()?,
-    )
-    .await?;
-    let described: Vec<(String, String)> = files
+    ))
+    .await
+    .map_err(|_| Error::protocol("The AirDrop device did not answer discovery. No acceptance request was sent. Keep it unlocked with AirDrop set to Everyone for 10 Minutes and try again."))??;
+    if discover.status != 200 {
+        return Err(Error::protocol(format!(
+            "the AirDrop device did not answer Discover ({})",
+            discover.status
+        )));
+    }
+    let reply = protocol::discover_reply(&discover.body);
+    if reply.is_none() {
+        return Err(Error::protocol(
+            "The AirDrop device returned an invalid discovery response.",
+        ));
+    }
+    tracing::info!(
+        %addr,
+        status = discover.status,
+        detail = %discover_body_detail(&discover.body),
+        "AirDrop discover"
+    );
+    if reply
+        .as_ref()
+        .is_some_and(|reply| reply.accepts == Some(false))
+    {
+        return Err(Error::Rejected(
+            "this device is not accepting AirDrop from everyone. Set AirDrop to Everyone for 10 Minutes and try again."
+                .into(),
+        ));
+    }
+    let described: Vec<(String, String, u64)> = files
         .iter()
         .map(|(name, bytes)| {
             let (mime, _) = protocol::describe(name, bytes);
-            (name.clone(), mime)
+            (name.clone(), mime, bytes.len() as u64)
         })
         .collect();
-    let ask = protocol::ask_request(sender_name, "whoosh", &described)?;
-    let response = post(&mut socket, "/Ask", "application/octet-stream", &ask).await?;
+    let ask = protocol::ask_request(
+        sender_name,
+        &hardware_model(),
+        &airdrop_sender_id(),
+        &described,
+    )?;
+    // The phone holds this response until the person accepts or declines.
+    progress(SendProgress::RequestingAcceptance);
+    let response = match timeout(
+        Duration::from_secs(60),
+        post(socket, "/Ask", host, "application/octet-stream", &ask),
+    )
+    .await
+    {
+        Ok(response) => response?,
+        Err(_) => {
+            return Err(Error::protocol(
+                "The device did not answer Whoosh's AirDrop request. If no prompt appeared, its AirDrop version may require a newer handshake. No file contents were sent.",
+            ))
+        }
+    };
     if response.status != 200 {
-        return Err(Error::Rejected(format!("ask status {}", response.status)));
+        return Err(Error::Rejected(format!(
+            "the AirDrop device declined the transfer ({})",
+            ask_failure(&response)
+        )));
     }
+    tracing::info!(%addr, "AirDrop request accepted; uploading files");
+    progress(SendProgress::Uploading);
     let archive = protocol::build_upload(files)?;
-    let response = post(&mut socket, "/Upload", "application/x-cpio", &archive).await?;
+    let response = timeout(
+        Duration::from_secs(600),
+        post(socket, "/Upload", host, "application/x-cpio", &archive),
+    )
+    .await
+    .map_err(|_| Error::protocol("AirDrop upload timed out; delivery could not be confirmed."))??;
     if response.status != 200 {
         return Err(Error::protocol(format!(
-            "upload status {}",
+            "the AirDrop device did not take the file ({})",
             response.status
         )));
     }
+    tracing::info!(%addr, "AirDrop upload completed");
     Ok(())
+}
+
+fn ask_failure(response: &StatusResponse) -> String {
+    if response.body.is_empty() {
+        return response.status.to_string();
+    }
+    format!(
+        "{}: {}",
+        response.status,
+        discover_body_detail(&response.body)
+    )
+}
+
+fn hardware_model() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+        {
+            if output.status.success() {
+                let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !model.is_empty()
+                    && model.len() <= 64
+                    && model.chars().all(|ch| ch.is_ascii_graphic())
+                {
+                    return model;
+                }
+            }
+        }
+    }
+    "Mac".to_string()
+}
+
+fn airdrop_sender_id() -> String {
+    let mut bytes = [0u8; 6];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    hex::encode(bytes)
 }
 
 struct StatusResponse {
     status: u16,
+    body: Vec<u8>,
 }
 
-async fn post<S>(io: &mut S, path: &str, content_type: &str, body: &[u8]) -> Result<StatusResponse>
+pub async fn discover_receiver_name(addr: std::net::SocketAddr) -> Option<String> {
+    match lookup_receiver_name(addr).await {
+        Ok(name) => Some(name),
+        Err(error) => {
+            tracing::info!(%addr, %error, "AirDrop device did not share its name");
+            None
+        }
+    }
+}
+
+async fn lookup_receiver_name(addr: std::net::SocketAddr) -> Result<String> {
+    let connector = super::interoperable_connector()?;
+    let mut socket = timeout(Duration::from_secs(3), async {
+        let socket = crate::net::connect_airdrop(addr)
+            .await
+            .map_err(|error| Error::protocol(format!("connect: {error}")))?;
+        connector
+            .connect(super::server_name(), socket)
+            .await
+            .map_err(|error| Error::protocol(format!("tls: {error}")))
+    })
+    .await
+    .map_err(|_| Error::protocol("timed out connecting"))??;
+    let body = protocol::discover_request()?;
+    let response = timeout(
+        Duration::from_secs(3),
+        post(
+            &mut socket,
+            "/Discover",
+            "whoosh",
+            "application/octet-stream",
+            &body,
+        ),
+    )
+    .await
+    .map_err(|_| Error::protocol("timed out waiting for Discover"))??;
+    if response.status != 200 {
+        return Err(Error::protocol(format!(
+            "discover status {}",
+            response.status
+        )));
+    }
+    protocol::receiver_computer_name(&response.body).ok_or_else(|| {
+        Error::protocol(format!(
+            "Discover reply had no computer name ({})",
+            discover_body_detail(&response.body)
+        ))
+    })
+}
+
+fn discover_body_detail(body: &[u8]) -> String {
+    let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(body)) else {
+        return format!("unparsed {} bytes", body.len());
+    };
+    let Some(dict) = value.as_dictionary() else {
+        return format!("not a dictionary, {} bytes", body.len());
+    };
+    let keys = dict.keys().cloned().collect::<Vec<_>>().join(", ");
+    if keys.is_empty() {
+        format!("empty dictionary, {} bytes", body.len())
+    } else {
+        keys
+    }
+}
+
+async fn post<S>(
+    io: &mut S,
+    path: &str,
+    host: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<StatusResponse>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // AirDrop/1.0 is the sender identity sharingd expects. Advertising
+    // Accept-Encoding makes some iPhones compress the reply, which this
+    // parser would then treat as a failed plist.
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: whoosh\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: keep-alive\r\nAccept: */*\r\nUser-Agent: AirDrop/1.0\r\nAccept-Language: en-us\r\n\r\n",
         body.len()
     );
     io.write_all(head.as_bytes()).await?;
@@ -456,7 +658,10 @@ where
     // Parse the status from the method slot: "HTTP/1.1" and the path slot is the code.
     let status = response.path.parse().unwrap_or(0);
     let _ = response.method;
-    Ok(StatusResponse { status })
+    Ok(StatusResponse {
+        status,
+        body: response.body,
+    })
 }
 
 #[allow(dead_code)]
@@ -466,10 +671,82 @@ fn _kind(mime: &str) -> MediaKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{send_plain, send_tls, AirdropConfig, AirdropReceiver};
+    use super::{send_plain, AirdropConfig, AirdropReceiver};
     use crate::approve::approval;
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn silent_discovery_times_out_before_requesting_acceptance() {
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let observed = std::sync::Mutex::new(Vec::new());
+        // The peer reads Discover but never responds. It must not receive Ask.
+        let peer = async {
+            let request = super::http::read_request(&mut server, 1024).await.unwrap();
+            assert_eq!(request.path, "/Discover");
+            let result = super::http::read_request(&mut server, 1024).await;
+            assert!(result.is_err());
+        };
+        let sending = async {
+            let error = super::send_session(
+                &mut client,
+                "127.0.0.1:8770".parse().unwrap(),
+                "Mac",
+                &[],
+                &|stage| observed.lock().unwrap().push(stage),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("No acceptance request was sent"), "{error}");
+            drop(client);
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(sending, peer);
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![super::SendProgress::Discovering]
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_tls_times_out_before_discovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let observed = std::sync::Mutex::new(Vec::new());
+        let connector = crate::airdrop::interoperable_connector().unwrap();
+        let peer = async {
+            use tokio::io::AsyncReadExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            assert!(!bytes.is_empty());
+        };
+        let sending = async {
+            let error = super::send_tls_with_progress(addr, "Mac", &[], connector, &|stage| {
+                observed.lock().unwrap().push(stage)
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("secure connection timed out"), "{error}");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(sending, peer);
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                super::SendProgress::Connecting,
+                super::SendProgress::SecuringConnection
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn receives_a_photo_and_a_video() {
@@ -508,17 +785,30 @@ mod tests {
         let receiver = AirdropReceiver::new(AirdropConfig::auto(dir.path()));
         let server = tokio::spawn(async move { receiver.accept_tls_one(listener, acceptor).await });
         let connector = crate::airdrop::client_connector(cert).unwrap();
-        let client = send_tls(
+        let observed = std::sync::Mutex::new(Vec::new());
+        let client = super::send_tls_with_progress(
             addr,
             "iPhone",
             &[("tls.jpg".into(), vec![0xFF, 0xD8, 0xFF])],
             connector,
+            &|stage| observed.lock().unwrap().push(stage),
         )
         .await;
         let server_result = server.await.unwrap();
         assert!(
             client.is_ok() && server_result.is_ok(),
             "client {client:?} server {server_result:?}"
+        );
+        use super::SendProgress::*;
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                Connecting,
+                SecuringConnection,
+                Discovering,
+                RequestingAcceptance,
+                Uploading
+            ]
         );
         assert_eq!(
             std::fs::read(dir.path().join("tls.jpg")).unwrap(),
@@ -594,7 +884,13 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
             let mut socket = connector.connect(crate::airdrop::server_name(), socket).await.unwrap();
-            let ask = super::protocol::ask_request("iPhone", "phone", &[("IMG_9457.jpg".into(), "image/jpeg".into())]).unwrap();
+            let ask = super::protocol::ask_request(
+                "iPhone",
+                "iPhone14,5",
+                "phone",
+                &[("IMG_9457.jpg".into(), "image/jpeg".into(), 1)],
+            )
+            .unwrap();
             let archive = include_bytes!("../../tests/fixtures/airdrop-odc.cpio");
             let mut upload = (0x8000_0000 | archive.len() as u32).to_be_bytes().to_vec();
             upload.extend_from_slice(archive); // stored DVZip block, no terminator

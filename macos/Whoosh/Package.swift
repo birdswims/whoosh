@@ -9,9 +9,11 @@ let package = Package(
     ],
     targets: [
         .target(name: "WhooshUI", path: "Sources/WhooshUI"),
+        .target(name: "WhooshAirDrop", path: "Sources/WhooshAirDrop"),
+        .testTarget(name: "WhooshAirDropTests", dependencies: ["WhooshAirDrop"]),
         .executableTarget(
             name: "Whoosh",
-            dependencies: ["WhooshUI"],
+            dependencies: ["WhooshUI", "WhooshAirDrop"],
             path: "Sources/Whoosh"
         ),
         .executableTarget(

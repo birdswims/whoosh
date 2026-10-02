@@ -3,7 +3,9 @@
 //! The record layout is the one documented by the Nearby Share protocol notes:
 //! a bit field, 16 identity bytes, an optional length-prefixed name, then TLVs.
 
-use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use std::collections::HashMap;
+
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
@@ -94,19 +96,17 @@ impl EndpointInfo {
             rest = &rest[len..];
             Some(name)
         };
+        // A short or cut-off trailer must not throw away the device name.
+        // Phones append vendor bytes that do not always fill a whole TLV.
         let mut tlvs = Vec::new();
-        while !rest.is_empty() {
-            if rest.len() < 2 {
-                return Err(Error::protocol("truncated endpoint tlv"));
-            }
+        while rest.len() >= 2 {
             let kind = rest[0];
             let len = rest[1] as usize;
-            rest = &rest[2..];
-            if rest.len() < len {
-                return Err(Error::protocol("truncated endpoint tlv"));
+            if rest.len() < 2 + len {
+                break;
             }
-            tlvs.push((kind, rest[..len].to_vec()));
-            rest = &rest[len..];
+            tlvs.push((kind, rest[2..2 + len].to_vec()));
+            rest = &rest[2 + len..];
         }
         Ok(Self {
             version,
@@ -193,6 +193,176 @@ pub fn decode_b64(value: &str) -> Result<Vec<u8>> {
         .map_err(|error| Error::protocol(format!("base64: {error}")))
 }
 
+/// Name to show for a Quick Share advertisement.
+///
+/// The `n` record is usually URL-safe base64 of an endpoint info blob. Some
+/// phones put that blob in the TXT value as raw bytes, and some put the
+/// device name in the value with no encoding at all. A broken trailer, or
+/// the visibility bit, does not discard a plaintext name that is still there.
+pub fn nearby_label(
+    txt: &HashMap<String, String>,
+    raw_n: Option<&[u8]>,
+    instance: &str,
+    hostname: &str,
+) -> String {
+    name_from_record(txt.get("n").map(String::as_str), raw_n)
+        .or_else(|| plain_record_name(txt.get("n").map(String::as_str)))
+        .or_else(|| {
+            ["name", "dn", "dev", "device", "fn"]
+                .iter()
+                .find_map(|key| plain_record_name(txt.get(*key).map(String::as_str)))
+        })
+        .or_else(|| instance_label(instance))
+        .or_else(|| hostname_label(hostname))
+        .unwrap_or_else(|| "Quick Share device".into())
+}
+
+/// Device name carried in an endpoint-info blob, encoded or raw.
+pub(crate) fn name_in_endpoint_info(bytes: &[u8]) -> Option<String> {
+    name_from_endpoint_bytes(bytes)
+}
+
+fn name_from_record(encoded: Option<&str>, raw: Option<&[u8]>) -> Option<String> {
+    // Base64 is itself UTF-8. Reading those letters as an endpoint blob
+    // yields a nonsense name, so decode the text form first.
+    if let Some(name) = encoded.and_then(name_from_encoded_text) {
+        return Some(name);
+    }
+    let raw = raw?;
+    if let Ok(text) = std::str::from_utf8(raw) {
+        if looks_like_encoded_blob(text) {
+            return None;
+        }
+    }
+    name_from_endpoint_bytes(raw)
+}
+
+fn name_from_encoded_text(text: &str) -> Option<String> {
+    let compact: String = text
+        .trim()
+        .trim_matches('"')
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if compact.is_empty() {
+        return None;
+    }
+    let bytes = decode_any_b64(&compact).ok()?;
+    name_from_endpoint_bytes(&bytes)
+}
+
+fn decode_any_b64(value: &str) -> Result<Vec<u8>> {
+    let mut padded = value.to_string();
+    if padded.len() % 4 != 1 {
+        let extra = (4 - padded.len() % 4) % 4;
+        padded.extend(std::iter::repeat('=').take(extra));
+    }
+    for engine in [&URL_SAFE_NO_PAD, &URL_SAFE, &STANDARD_NO_PAD, &STANDARD] {
+        for candidate in [value, padded.as_str()] {
+            if let Ok(bytes) = engine.decode(candidate) {
+                if bytes.len() >= 17 {
+                    return Ok(bytes);
+                }
+            }
+        }
+    }
+    Err(Error::protocol("endpoint info is too short"))
+}
+
+fn name_from_endpoint_bytes(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 18 {
+        return None;
+    }
+    if let Ok(info) = EndpointInfo::decode(bytes) {
+        if let Some(name) = info.name.as_deref().and_then(human_device_name) {
+            return Some(name);
+        }
+    }
+    plaintext_name(bytes)
+}
+
+fn plaintext_name(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 18 {
+        return None;
+    }
+    let len = bytes[17] as usize;
+    if !(2..=128).contains(&len) || 18 + len > bytes.len() {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes[18..18 + len]).ok()?;
+    let name = human_device_name(text)?;
+    if name.chars().count() < 2 {
+        return None;
+    }
+    Some(name)
+}
+
+fn plain_record_name(value: Option<&str>) -> Option<String> {
+    let value = value?.trim().trim_matches('"');
+    if looks_like_encoded_blob(value) {
+        return None;
+    }
+    human_device_name(value)
+}
+
+fn looks_like_encoded_blob(value: &str) -> bool {
+    let compact: String = value.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact.len() >= 20
+        && compact
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '-' | '_' | '='))
+}
+
+fn instance_label(instance: &str) -> Option<String> {
+    let instance = instance.trim();
+    if instance.is_empty() || parse_instance_name(instance).is_ok() || is_endpoint_token(instance) {
+        return None;
+    }
+    human_device_name(instance)
+}
+
+fn is_endpoint_token(value: &str) -> bool {
+    matches!(value.len(), 14 | 16)
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '='))
+}
+
+fn hostname_label(hostname: &str) -> Option<String> {
+    let host = hostname.trim().trim_end_matches('.');
+    let host = host.strip_suffix(".local").unwrap_or(host);
+    let lower = host.to_ascii_lowercase();
+    if lower.is_empty()
+        || lower == "localhost"
+        || lower == "android"
+        || lower.starts_with("android-")
+        || lower.starts_with("whoosh-")
+        || lower.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    human_device_name(host)
+}
+
+fn human_device_name(value: &str) -> Option<String> {
+    let value = value.trim_matches('\0').trim();
+    let count = value.chars().count();
+    if !(1..=128).contains(&count) {
+        return None;
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return None;
+    }
+    // Punctuation alone is not a device name. Letters, digits, and emoji are.
+    if !value
+        .chars()
+        .any(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation())
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -252,5 +422,82 @@ mod tests {
 
     fn decode_txt(value: &str) -> Vec<u8> {
         super::decode_b64(value).unwrap()
+    }
+
+    #[test]
+    fn a_cut_off_trailer_keeps_the_device_name() {
+        let mut info = EndpointInfo::visible("Pixel 8", DEVICE_LAPTOP);
+        info.salt = [1, 2];
+        info.metadata_key = [3; 14];
+        info.tlvs.push((1, vec![9, 8, 7, 6]));
+        let mut bytes = info.encode().unwrap();
+        bytes.pop();
+        let decoded = EndpointInfo::decode(&bytes).unwrap();
+        assert_eq!(decoded.name.as_deref(), Some("Pixel 8"));
+        assert!(decoded.tlvs.is_empty());
+    }
+
+    #[test]
+    fn nearby_label_reads_raw_standard_and_plain_names() {
+        use std::collections::HashMap;
+
+        use base64::Engine;
+
+        let mut info = EndpointInfo::visible("Pixel 8", DEVICE_LAPTOP);
+        info.salt = [0xfb, 0xff];
+        info.metadata_key = [0xef; 14];
+        let raw = info.encode().unwrap();
+        let standard = base64::engine::general_purpose::STANDARD.encode(&raw);
+        assert!(standard.contains('+') || standard.contains('/'));
+
+        let mut txt = HashMap::new();
+        txt.insert("n".into(), standard);
+        assert_eq!(super::nearby_label(&txt, None, "", ""), "Pixel 8");
+        txt.insert("n".into(), info.encode_txt().unwrap());
+        assert_eq!(super::nearby_label(&txt, None, "", ""), "Pixel 8");
+
+        let mut raw_txt = HashMap::new();
+        assert_eq!(super::nearby_label(&raw_txt, Some(&raw), "", ""), "Pixel 8");
+
+        raw_txt.insert("n".into(), "Living Room".into());
+        assert_eq!(super::nearby_label(&raw_txt, None, "", ""), "Living Room");
+
+        let token = service_instance_name("Ab12").unwrap();
+        assert_eq!(
+            super::nearby_label(&HashMap::new(), None, &token, ""),
+            "Quick Share device"
+        );
+        assert_eq!(
+            super::nearby_label(&HashMap::new(), None, "Living Room", ""),
+            "Living Room"
+        );
+        assert_eq!(
+            super::nearby_label(&HashMap::new(), None, &token, "Harrys-Pixel.local."),
+            "Harrys-Pixel"
+        );
+        assert_eq!(
+            super::nearby_label(&HashMap::new(), None, &token, "android-deadbeef.local."),
+            "Quick Share device"
+        );
+    }
+
+    #[test]
+    fn a_hidden_record_still_shows_a_plaintext_name() {
+        let info = EndpointInfo {
+            version: 1,
+            hidden: true,
+            device_type: DEVICE_LAPTOP,
+            salt: [0; 2],
+            metadata_key: [0; 14],
+            name: None,
+            tlvs: Vec::new(),
+        };
+        let mut bytes = info.encode().unwrap();
+        bytes.push(6);
+        bytes.extend_from_slice(b"Pixel8");
+        assert_eq!(
+            super::name_in_endpoint_info(&bytes).as_deref(),
+            Some("Pixel8")
+        );
     }
 }

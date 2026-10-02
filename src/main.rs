@@ -1,7 +1,6 @@
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let app = std::env::args().nth(1).as_deref() == Some("app");
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // The app protocol owns stdout. Logs have to stay on stderr.
@@ -17,8 +16,6 @@ async fn main() {
             .with_target(false)
             .init();
     }
-    if let Err(error) = whoosh::cli::execute().await {
-        eprintln!("error: {error}");
-        std::process::exit(1);
-    }
+
+    whoosh::cli::launch();
 }

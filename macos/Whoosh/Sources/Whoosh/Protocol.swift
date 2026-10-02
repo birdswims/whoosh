@@ -1,4 +1,5 @@
 import Foundation
+import WhooshAirDrop
 
 struct Command: Encodable {
     var id: String
@@ -30,6 +31,7 @@ struct Peer: Identifiable, Decodable, Hashable {
     var address: String
     var fingerprint: String?
     var trusted: Bool
+    var airdropTarget: AirDropTarget?
 }
 
 struct OfferFile: Decodable, Hashable {

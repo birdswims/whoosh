@@ -167,6 +167,7 @@ struct Listed {
     fingerprint: Option<String>,
     trusted: bool,
     instance: String,
+    airdrop_target: Option<Value>,
 }
 
 struct Host {
@@ -817,9 +818,9 @@ fn prepare_send(host: &Host, command: &Command) -> Result<SendJob> {
         .clone()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| Error::protocol("choose a device"))?;
-    let _: SocketAddr = target
-        .parse()
-        .map_err(|_| Error::protocol("device address is invalid"))?;
+    if discover::parse_peer_addr(&target).is_none() {
+        return Err(Error::protocol("device address is invalid"));
+    }
     let files = command.files.clone().unwrap_or_default();
     if files.is_empty() {
         return Err(Error::protocol("choose a file to send"));
@@ -865,19 +866,49 @@ fn prepare_send(host: &Host, command: &Command) -> Result<SendJob> {
 async fn run_send(job: SendJob, emit: Emit) {
     let id = random_id();
     let count = job.files.len();
+    let detail = if job.via == "airdrop" {
+        format!("preparing files for {}", job.peer_name)
+    } else {
+        format!("to {}", job.peer_name)
+    };
     activity(
         &emit,
         &id,
         "out",
         "working",
         &files_phrase(count, "Sending"),
-        &format!("to {}", job.peer_name),
+        &detail,
         &job.peer_name,
         &job.via,
         None,
         None,
     );
-    match perform_send(&job).await {
+    let progress = |stage| {
+        let detail = match stage {
+            airdrop::SendProgress::Connecting => format!("connecting to {}", job.peer_name),
+            airdrop::SendProgress::SecuringConnection => {
+                format!("securing connection to {}", job.peer_name)
+            }
+            airdrop::SendProgress::Discovering => format!("checking AirDrop on {}", job.peer_name),
+            airdrop::SendProgress::RequestingAcceptance => {
+                format!("requesting acceptance on {}", job.peer_name)
+            }
+            airdrop::SendProgress::Uploading => format!("transferring to {}", job.peer_name),
+        };
+        activity(
+            &emit,
+            &id,
+            "out",
+            "working",
+            &files_phrase(count, "Sending"),
+            &detail,
+            &job.peer_name,
+            &job.via,
+            None,
+            None,
+        );
+    };
+    match perform_send(&job, &progress).await {
         Ok(bytes) => activity(
             &emit,
             &id,
@@ -905,11 +936,12 @@ async fn run_send(job: SendJob, emit: Emit) {
     }
 }
 
-async fn perform_send(job: &SendJob) -> Result<u64> {
-    let addr: SocketAddr = job
-        .target
-        .parse()
-        .map_err(|_| Error::protocol("device address is invalid"))?;
+async fn perform_send(
+    job: &SendJob,
+    progress: &(dyn Fn(airdrop::SendProgress) + Send + Sync),
+) -> Result<u64> {
+    let addr = discover::parse_peer_addr(&job.target)
+        .ok_or_else(|| Error::protocol("device address is invalid"))?;
     match job.via.as_str() {
         "whoosh" => {
             let trust = whoosh_trust(addr, job)?;
@@ -942,7 +974,8 @@ async fn perform_send(job: &SendJob) -> Result<u64> {
                 .await
                 .map_err(|error| Error::protocol(error.to_string()))??;
             let connector = airdrop::interoperable_connector()?;
-            airdrop::send_tls(addr, &job.sender_name, &payloads, connector).await?;
+            airdrop::send_tls_with_progress(addr, &job.sender_name, &payloads, connector, progress)
+                .await?;
             Ok(bytes)
         }
         _ => Err(Error::protocol("unknown device")),
@@ -999,6 +1032,7 @@ async fn discover_loop(cancel: CancellationToken, filter: Arc<Mutex<Filter>>, em
             (native::SERVICE_TYPE, "whoosh"),
             (QUICKSHARE, "quickshare"),
             (AIRDROP, "airdrop"),
+            (crate::airdrop::ALT_SERVICE_TYPE, "airdrop"),
         ]) {
             Ok(browser) => browser,
             Err(error) => {
@@ -1215,7 +1249,7 @@ fn same_device(left: &Listed, right: &Listed) -> bool {
 }
 
 fn host_of(address: &str) -> Option<IpAddr> {
-    address.parse::<SocketAddr>().ok().map(|addr| addr.ip())
+    discover::parse_peer_addr(address).map(|addr| addr.ip())
 }
 
 fn display_key(name: &str) -> Option<String> {
@@ -1228,8 +1262,15 @@ fn display_key(name: &str) -> Option<String> {
 }
 
 fn merge_listed(stored: &mut Listed, fresh: Listed, take_fresh_address: bool) {
-    let replace_address =
-        take_fresh_address || addr_rank_str(&fresh.address) <= addr_rank_str(&stored.address);
+    // An iPhone is reachable on its AWDL address. A later Wi-Fi record for the
+    // same service must not replace that scoped link-local address.
+    let replace_address = if scoped_addr(&stored.address) && !scoped_addr(&fresh.address) {
+        false
+    } else if scoped_addr(&fresh.address) && !scoped_addr(&stored.address) {
+        true
+    } else {
+        take_fresh_address || addr_rank_str(&fresh.address) <= addr_rank_str(&stored.address)
+    };
     let placeholder = fresh.name.is_empty()
         || fresh.name == "Quick Share device"
         || fresh.name == "AirDrop device";
@@ -1245,6 +1286,7 @@ fn merge_listed(stored: &mut Listed, fresh: Listed, take_fresh_address: bool) {
     }
     if replace_address {
         stored.address = fresh.address;
+        stored.airdrop_target = fresh.airdrop_target;
     }
     stored.detail = if stored.via == "whoosh" {
         stored
@@ -1260,10 +1302,16 @@ fn merge_listed(stored: &mut Listed, fresh: Listed, take_fresh_address: bool) {
 }
 
 fn addr_rank_str(address: &str) -> u8 {
-    address
-        .parse::<SocketAddr>()
+    discover::parse_peer_addr(address)
         .map(|addr| discover::addr_rank(addr.ip()))
         .unwrap_or(u8::MAX)
+}
+
+fn scoped_addr(address: &str) -> bool {
+    matches!(
+        discover::parse_peer_addr(address),
+        Some(SocketAddr::V6(addr)) if addr.scope_id() != 0
+    )
 }
 
 fn roster_key(fullname: &str, id: &str) -> String {
@@ -1306,19 +1354,17 @@ fn list_native(peer: FoundPeer) -> Listed {
         fingerprint,
         address,
         instance: peer.instance,
+        airdrop_target: None,
     }
 }
 
 fn list_quickshare(peer: FoundPeer) -> Listed {
-    let name = peer
-        .txt
-        .get("n")
-        .and_then(|value| {
-            let bytes = quickshare::decode_b64(value).ok()?;
-            EndpointInfo::decode(&bytes).ok()?.name
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Quick Share device".into());
+    let name = quickshare::nearby_label(
+        &peer.txt,
+        peer.txt_raw.get("n").map(Vec::as_slice),
+        &peer.instance,
+        &peer.hostname,
+    );
     let address = peer.addr.to_string();
     // The Nearby endpoint id changes when a transfer starts. The display name
     // is what stays put, so the row does not split into two.
@@ -1336,26 +1382,41 @@ fn list_quickshare(peer: FoundPeer) -> Listed {
         fingerprint: None,
         trusted: false,
         instance: peer.instance,
+        airdrop_target: None,
     }
 }
 
 fn list_airdrop(peer: FoundPeer) -> Listed {
-    let unnamed = peer.instance.is_empty()
-        || (peer.instance.len() >= 8 && peer.instance.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let target = json!({
+        "service_name": peer.instance,
+        "host_name": peer.hostname,
+        "port": peer.addr.port(),
+        "flags": peer.txt.get("flags").and_then(|value| value.parse::<u64>().ok()),
+    });
+    let recorded = peer
+        .txt
+        .get("name")
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let name = recorded.unwrap_or_else(|| {
+        if discover::unnamed_airdrop_instance(&peer.instance) {
+            "AirDrop device".into()
+        } else {
+            peer.instance.clone()
+        }
+    });
     let address = peer.addr.to_string();
     Listed {
         id: peer_id("airdrop", &peer.instance, None, &address),
         via: "airdrop",
-        name: if unnamed {
-            "AirDrop device".into()
-        } else {
-            peer.instance.clone()
-        },
+        name,
         detail: address.clone(),
         address,
         fingerprint: None,
         trusted: false,
         instance: peer.instance,
+        airdrop_target: Some(target),
     }
 }
 
@@ -1387,12 +1448,13 @@ fn listed_json(peer: &Listed) -> Value {
         "address": peer.address,
         "fingerprint": peer.fingerprint,
         "trusted": peer.trusted,
+        "airdrop_target": peer.airdrop_target,
     })
 }
 
 impl Filter {
     fn hides(&self, peer: &Listed) -> bool {
-        let Ok(addr) = peer.address.parse::<SocketAddr>() else {
+        let Some(addr) = discover::parse_peer_addr(&peer.address) else {
             return false;
         };
         let local = is_local(addr.ip());
@@ -1835,6 +1897,7 @@ mod tests {
             fingerprint,
             trusted: false,
             instance: instance.into(),
+            airdrop_target: None,
         }
     }
 
@@ -1895,6 +1958,77 @@ mod tests {
             false,
         );
         assert_eq!(roster.visible()[0].address, "192.168.1.20:8770");
+    }
+
+    #[test]
+    fn an_awdl_address_is_not_replaced_by_wi_fi() {
+        let mut roster = Roster::default();
+        let fullname = "phone._airdrop._tcp.local.";
+        roster.resolve(
+            fullname,
+            sample("airdrop", "[fe80::1%16]:8770", None, "Harry's iPhone"),
+            false,
+        );
+        roster.resolve(
+            fullname,
+            sample("airdrop", "192.168.1.40:8770", None, "Harry's iPhone"),
+            false,
+        );
+        assert_eq!(roster.visible()[0].address, "[fe80::1%16]:8770");
+        roster.resolve(
+            fullname,
+            sample("airdrop", "[fe80::2%16]:8770", None, "Harry's iPhone"),
+            false,
+        );
+        assert_eq!(roster.visible()[0].address, "[fe80::2%16]:8770");
+    }
+
+    #[test]
+    fn airdrop_row_uses_the_name_from_discover() {
+        use std::collections::HashMap;
+        let mut txt = HashMap::new();
+        txt.insert("name".into(), "Harry's iPhone".into());
+        txt.insert("flags".into(), "111611".into());
+        let peer = FoundPeer {
+            instance: "aabbccddeeff".into(),
+            fullname: "aabbccddeeff._airdrop._tcp.local.".into(),
+            addr: "192.168.1.8:8770".parse().unwrap(),
+            txt,
+            txt_raw: HashMap::new(),
+            hostname: "receiver.local".into(),
+        };
+        let listed = list_airdrop(peer);
+        assert_eq!(listed.name, "Harry's iPhone");
+        assert_eq!(
+            listed_json(&listed)["airdrop_target"],
+            json!({
+                "service_name": "aabbccddeeff",
+                "host_name": "receiver.local",
+                "port": 8770,
+                "flags": 111611,
+            })
+        );
+    }
+
+    #[test]
+    fn airdrop_target_metadata_stays_with_the_selected_address() {
+        let mut stored = sample("airdrop", "[fe80::1%16]:8770", None, "same-device");
+        stored.airdrop_target = Some(json!({"host_name": "awdl.local", "port": 8770}));
+        let mut lan = sample("airdrop", "192.168.1.5:8771", None, "same-device");
+        lan.airdrop_target = Some(json!({"host_name": "lan.local", "port": 8771}));
+        merge_listed(&mut stored, lan, true);
+        assert_eq!(
+            stored.airdrop_target.as_ref().unwrap()["host_name"],
+            "awdl.local"
+        );
+        let mut fresh = sample("airdrop", "[fe80::2%16]:8772", None, "same-device");
+        fresh.airdrop_target = Some(json!({"host_name": "fresh.local", "port": 8772}));
+        merge_listed(&mut stored, fresh, true);
+        assert_eq!(
+            stored.airdrop_target.as_ref().unwrap()["host_name"],
+            "fresh.local"
+        );
+        assert_eq!(stored.address, "[fe80::2%16]:8772");
     }
 
     #[test]

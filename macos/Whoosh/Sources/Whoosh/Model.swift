@@ -1,12 +1,14 @@
 import AppKit
 import Observation
 import UniformTypeIdentifiers
+import WhooshAirDrop
 
 @Observable
 final class AppModel {
     static weak var shared: AppModel?
 
     private let engine = Engine()
+    private let airDropSender = AirDropSender()
     private var wired = false
     private var didShutdown = false
     private var appliedPrefs = false
@@ -49,16 +51,20 @@ final class AppModel {
     var banner: String?
     var engineDown = false
     var engineError = ""
+    var sending = false
 
     var selectedPeer: Peer? {
         peers.first { $0.id == selectedPeerID }
     }
 
     var canSend: Bool {
-        selectedPeer != nil && !files.isEmpty && !engineDown && currentOffer == nil && trustPeer == nil
+        selectedPeer != nil && !files.isEmpty && !engineDown && currentOffer == nil && trustPeer == nil && !sending
     }
 
     var sendTitle: String {
+        if sending {
+            return "Sending…"
+        }
         if let name = selectedPeer?.name, !name.isEmpty {
             return "Send to \(name)"
         }
@@ -96,6 +102,7 @@ final class AppModel {
     func shutdown() {
         guard !didShutdown else { return }
         didShutdown = true
+        airDropSender.cancel()
         engine.stopAndWait()
     }
 
@@ -213,18 +220,18 @@ final class AppModel {
     }
 
     func send() {
-        guard let peer = selectedPeer, !files.isEmpty else { return }
+        guard !sending, let peer = selectedPeer, !files.isEmpty else { return }
         if peer.via == "whoosh", !peer.trusted {
             trustPeer = peer
             return
         }
-        performSend(peer, trust: peer.via == "whoosh")
+        beginSend(peer, trust: peer.via == "whoosh")
     }
 
     func confirmTrust() {
         guard let peer = trustPeer else { return }
         trustPeer = nil
-        performSend(peer, trust: true)
+        beginSend(peer, trust: true)
     }
 
     func cancelTrust() {
@@ -260,6 +267,47 @@ final class AppModel {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(fingerprint, forType: .string)
         showBanner("Fingerprint copied.")
+    }
+
+    private func beginSend(_ peer: Peer, trust: Bool) {
+        sending = true
+        if peer.via == "airdrop" {
+            sendAirDrop(peer)
+            return
+        }
+        performSend(peer, trust: trust)
+    }
+
+    private func sendAirDrop(_ peer: Peer) {
+        let id = UUID().uuidString
+        let count = files.count
+        let title = count == 1 ? "Sending 1 file" : "Sending \(count) files"
+        func event(_ state: String, _ title: String, _ detail: String, bytes: UInt64? = nil) -> WireEvent {
+            WireEvent(ev: "activity", id: id, via: "airdrop", peer: peer.name,
+                      direction: "out", state: state, title: title, detail: detail, bytes: bytes)
+        }
+        guard let target = peer.airdropTarget else {
+            record(event("failed", "Could not send", "The device's AirDrop details are unavailable. Refresh nearby devices and try again."))
+            return
+        }
+        record(event("working", title, "preparing files for \(peer.name)"))
+        airDropSender.send(to: target, name: peer.name, files: files.map { URL(fileURLWithPath: $0.path) }) { [weak self] update in
+            guard let self else { return }
+            switch update {
+            case .preparing:
+                self.record(event("working", title, "preparing files for \(peer.name)"))
+            case .requestingAcceptance:
+                self.record(event("working", title, "requesting acceptance on \(peer.name)"))
+            case .transferring(let bytes, _):
+                self.record(event("working", title, "transferring to \(peer.name)", bytes: bytes))
+            case .completed(let bytes):
+                self.record(event("done", count == 1 ? "Sent 1 file" : "Sent \(count) files", "to \(peer.name)", bytes: bytes))
+            case .failed(let message):
+                self.record(event("failed", "Could not send", message))
+            case .cancelled:
+                self.record(event("failed", "AirDrop cancelled", "The AirDrop transfer was cancelled."))
+            }
+        }
     }
 
     private func performSend(_ peer: Peer, trust: Bool) {
@@ -302,6 +350,7 @@ final class AppModel {
             applySavedPreferencesIfNeeded()
         case "ack":
             if event.ok == false, let error = event.error, !error.isEmpty {
+                sending = false
                 showBanner(error)
             }
         case "peers":
@@ -310,8 +359,16 @@ final class AppModel {
             if let selected = selectedPeerID, !incoming.contains(where: { $0.id == selected }) {
                 let previous = peers.first { $0.id == selected }
                 if let match = incoming.first(where: { peer in
-                    "\(peer.via)|\(peer.address)" == selected
-                        || previous.map { $0.via == peer.via && $0.name == peer.name } == true
+                    if "\(peer.via)|\(peer.address)" == selected {
+                        return true
+                    }
+                    guard let previous, previous.via == peer.via else { return false }
+                    if previous.name == peer.name {
+                        return true
+                    }
+                    // An iPhone keeps one row, but its service name changes
+                    // between advertisements. Stay on that row.
+                    return previous.via == "airdrop" && incoming.filter { $0.via == "airdrop" }.count == 1 && peer.via == "airdrop"
                 }) {
                     selectedPeerID = match.id
                     UserDefaults.standard.set(match.id, forKey: Pref.selected)
@@ -423,11 +480,17 @@ final class AppModel {
         if activity.count > 40 {
             activity.removeLast(activity.count - 40)
         }
+        if event.direction == "out", event.state == "done" || event.state == "failed" {
+            sending = false
+        }
         if event.direction == "out", event.state == "done" {
             let name = event.peer ?? ""
             let via = event.via ?? ""
             for index in peers.indices where peers[index].name == name && peers[index].via == via {
                 peers[index].trusted = true
+            }
+            if banner != nil {
+                banner = nil
             }
         }
         if event.state == "failed" {
@@ -439,6 +502,7 @@ final class AppModel {
     private func handleExit(_ message: String) {
         guard !didShutdown else { return }
         engineDown = true
+        sending = airDropSender.isSending
         receiving = false
         let line = message.split(whereSeparator: \.isNewline).last.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         engineError = line.isEmpty ? "Whoosh stopped unexpectedly." : String(line.prefix(280))

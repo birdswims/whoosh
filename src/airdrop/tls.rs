@@ -17,6 +17,15 @@ use crate::native::install_crypto;
 
 pub fn server_acceptor() -> Result<(TlsAcceptor, CertificateDer<'static>)> {
     install_crypto();
+    let (cert_der, key_der) = identity()?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .map_err(|error| Error::crypto(error.to_string()))?;
+    Ok((TlsAcceptor::from(Arc::new(config)), cert_der))
+}
+
+fn identity() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
     // AirDrop clients still offer only RSA cipher suites. An ECDSA certificate
     // makes the handshake fail with alert 40, and the iPhone then shows no row.
     // rcgen's default expiry is year 4096, which does not fit in the 32-bit
@@ -36,11 +45,7 @@ pub fn server_acceptor() -> Result<(TlsAcceptor, CertificateDer<'static>)> {
         .map_err(|error| Error::crypto(error.to_string()))?;
     let cert_der = CertificateDer::from(cert);
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der.clone()], key_der)
-        .map_err(|error| Error::crypto(error.to_string()))?;
-    Ok((TlsAcceptor::from(Arc::new(config)), cert_der))
+    Ok((cert_der, key_der))
 }
 
 pub fn client_connector(expected: CertificateDer<'static>) -> Result<TlsConnector> {
@@ -57,10 +62,16 @@ pub fn client_connector(expected: CertificateDer<'static>) -> Result<TlsConnecto
 
 pub fn interoperable_connector() -> Result<TlsConnector> {
     install_crypto();
+    // AirDrop requests a client identity as well as presenting its own.
+    // The legacy Everyone-mode protocol permits a self-signed identity.
+    // This does not implement newer identity/code pairing or access Apple
+    // account keys or validation records.
+    let (certificate, key) = identity()?;
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(SignatureOnly::new())
-        .with_no_client_auth();
+        .with_client_auth_cert(vec![certificate], key)
+        .map_err(|error| Error::crypto(error.to_string()))?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -125,6 +136,43 @@ impl ServerCertVerifier for SignatureOnly {
 #[cfg(test)]
 mod tests {
     use super::server_acceptor;
+
+    #[tokio::test]
+    async fn interoperable_sender_supplies_client_identity() {
+        use std::sync::Arc;
+        let connector = super::interoperable_connector().unwrap();
+        let identity = connector
+            .config()
+            .client_auth_cert_resolver
+            .resolve(&[], &[rustls::SignatureScheme::RSA_PSS_SHA256])
+            .expect("AirDrop sender must present a client certificate");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(identity.cert[0].clone()).unwrap();
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        let (cert, key) = super::identity().unwrap();
+        let config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (sent, received) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                connector.connect(super::server_name(), client),
+                acceptor.accept(server)
+            )
+        })
+        .await
+        .unwrap();
+        sent.unwrap();
+        let received = received.unwrap();
+        assert_eq!(
+            received.get_ref().1.peer_certificates().unwrap(),
+            identity.cert
+        );
+    }
 
     #[test]
     fn certificate_is_rsa_and_expires_before_2038() {

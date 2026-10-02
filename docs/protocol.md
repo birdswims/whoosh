@@ -41,6 +41,49 @@ The iPhone still browses `_airdrop._tcp`. In `sharingd`, that browser drops a no
 
 Live validation on macOS 27 / iOS 27 confirmed IPv6 TCP connections over `awdl0`, successful TLS and `/Discover` responses, and a visible Whoosh name after enabling AWDL reception and stopping an older concurrent receiver. The capture also contained modern pairing and QUIC service queries; those do not imply that the phone has stopped supporting the legacy HTTPS discovery path. Picker visibility is separate from a completed file-transfer test.
 
+The legacy HTTPS sender’s outgoing AirDrop sockets also enable `SO_RECV_ANYIF`, including sockets bound
+to a scoped AWDL address. The interoperable TLS sender presents a self-signed
+RSA client identity when requested. This is not an Apple account identity or
+an implementation of the newer AirDrop code-pairing protocol.
+
+Legacy sender activity follows preparation, TCP connection, TLS, Discover,
+Ask, and Upload separately. Connecting and TLS/Discover each have an 8-second
+deadline; Ask has 60 seconds and Upload has 10 minutes. An unanswered Ask
+does not establish that the receiver showed an acceptance prompt. The app
+no longer tells the user to accept before the request has been attempted.
+Socket-option, mutual-TLS, silent-peer timeout, and progress-order tests cover
+these behaviors locally.
+
+The macOS GUI sends through `SFOperation` in Sharing.framework, targeting the
+exact Bonjour instance, hostname, port, and flags discovered by the engine.
+The selected device is passed directly to the transfer service; it does not
+invoke a sharing sheet or use the entitlement-restricted system browser.
+The OS performs sender authentication and transfer negotiation using the Mac's
+AirDrop identity. Whoosh neither extracts account credentials nor changes
+entitlements. Framework symbols are resolved at runtime, with an explicit error
+if they are absent. These are private APIs and need checking on future macOS
+releases.
+
+The sender resumes the system operation after event 2 (preparation), displays
+request/transfer progress for events 3/5/6/7, and marks success only on event 9.
+Events 4 and 10 end the transfer as cancelled or failed. An acceptance or even
+100% byte progress is not reported as delivery. Callback context retention,
+cancellation, and a 90-second preparation/acceptance deadline plus a 120-second
+transfer inactivity deadline prevent an abandoned operation from holding Send
+indefinitely. Discovery updates carry the target metadata together with their
+chosen address, preserving the AWDL target when a LAN advertisement arrives.
+
+Live validation on macOS 27 / iPadOS 27.0 confirmed the system direct-send path:
+Ask and Upload both returned HTTP 200, macOS reported completion, and the user
+confirmed receipt of the test file. An opt-in XCTest then exercised the
+integrated sender against the same iPad, confirmed all 32 file bytes and the
+completion callback, and verified that the sender released its active state.
+The legacy sender reached Discover with
+`IsAirDropable=true` but got no Ask response, even with a client certificate.
+This is why the GUI uses the system transfer service. The precise missing
+legacy-handshake requirement remains undetermined; it is not necessary to
+reimplement it for the macOS GUI path.
+
 AirDrop uploads can contain either CPIO newc (`070701`) or POSIX odc (`070707`)
 archives. Odc uses octal fields in a 76-byte header and has no newc-style
 four-byte padding. Directory entries, including the archive root, are skipped;

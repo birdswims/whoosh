@@ -894,20 +894,14 @@ fn peer_name_from_request(frame: &conn::OfflineFrame) -> String {
     else {
         return "Quick Share device".into();
     };
-    if let Some(info) = request
-        .endpoint_info
-        .as_ref()
-        .and_then(|bytes| EndpointInfo::decode(bytes).ok())
-    {
-        if let Some(name) = info.name {
+    if let Some(bytes) = request.endpoint_info.as_deref() {
+        if let Some(name) = endpoint::name_in_endpoint_info(bytes) {
             return name;
         }
     }
     let legacy = request.endpoint_name.as_deref().unwrap_or_default();
-    if let Ok(info) = EndpointInfo::decode(legacy) {
-        if let Some(name) = info.name.filter(|name| !name.is_empty()) {
-            return name;
-        }
+    if let Some(name) = endpoint::name_in_endpoint_info(legacy) {
+        return name;
     }
     std::str::from_utf8(legacy)
         .ok()
