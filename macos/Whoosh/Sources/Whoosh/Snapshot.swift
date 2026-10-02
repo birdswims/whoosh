@@ -32,6 +32,9 @@ enum Snapshot {
         try render(RootView().environment(stoppedModel()), name: "stopped-light", scheme: .light, width: 1000, height: 720, to: root)
         try render(SettingsView().environment(populated()), name: "settings-light", scheme: .light, width: 460, height: 640, to: root)
         try render(SettingsView().environment(populated()), name: "settings-dark", scheme: .dark, width: 460, height: 640, to: root)
+        try render(ActivityView().environment(populated()), name: "activity-light", scheme: .light, width: 480, height: 560, to: root)
+        try render(ActivityView().environment(populated()), name: "activity-dark", scheme: .dark, width: 480, height: 560, to: root)
+        try render(ActivityView().environment(emptyModel()), name: "activity-empty", scheme: .light, width: 480, height: 560, to: root)
     }
 
     @MainActor

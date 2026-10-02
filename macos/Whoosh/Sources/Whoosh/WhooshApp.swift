@@ -29,10 +29,33 @@ struct WhooshApp: App {
                 .keyboardShortcut("r")
             }
         }
+        .commands {
+            WhooshWindowCommands()
+        }
+
+        Window("Activity", id: "activity") {
+            ActivityView()
+                .environment(model)
+        }
+        .defaultSize(width: 480, height: 560)
+        .windowResizability(.contentMinSize)
 
         Settings {
             SettingsView()
                 .environment(model)
+        }
+    }
+}
+
+private struct WhooshWindowCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .windowList) {
+            Button("Activity") {
+                openWindow(id: "activity")
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
         }
     }
 }

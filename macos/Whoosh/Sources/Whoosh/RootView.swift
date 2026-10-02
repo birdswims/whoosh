@@ -5,6 +5,7 @@ import WhooshUI
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.openWindow) private var openWindow
     @State private var dropping = false
 
     var body: some View {
@@ -26,7 +27,6 @@ struct RootView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxHeight: .infinity)
-                ActivityCard()
                 footer
             }
             .padding(.top, 36)
@@ -105,14 +105,27 @@ struct RootView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(Capsule().fill(Color.primary.opacity(0.05)))
-            SettingsLink {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
+            HStack(spacing: 2) {
+                Button {
+                    openWindow(id: "activity")
+                } label: {
+                    Image(systemName: "clock")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Activity")
+                .accessibilityLabel("Activity")
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
             }
-            .buttonStyle(.plain)
-            .help("Settings")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -384,90 +397,6 @@ private struct PeerRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(peer.name), \(protocolLabel(peer.via))")
-    }
-}
-
-private struct ActivityCard: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionTitle("Activity")
-            if model.activity.isEmpty {
-                Text("Transfers show up here.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(model.activity) { item in
-                            ActivityRow(item: item)
-                        }
-                    }
-                }
-            }
-        }
-        .frame(height: 168)
-        .modifier(CardStyle())
-    }
-}
-
-private struct ActivityRow: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.colorScheme) private var scheme
-    var item: ActivityItem
-
-    var body: some View {
-        HStack(spacing: 10) {
-            stateMark
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 8)
-            if item.state == "done", !item.paths.isEmpty {
-                Button("Show") { model.showActivity(item) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
-    private var subtitle: String {
-        if let bytes = item.bytes, item.state == "done" {
-            return "\(item.detail) · \(humanSize(bytes))"
-        }
-        return item.detail
-    }
-
-    @ViewBuilder
-    private var stateMark: some View {
-        switch item.state {
-        case "working":
-            ProgressView().controlSize(.small)
-        case "done":
-            Image(systemName: "checkmark")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.signal(scheme))
-        case "failed":
-            Image(systemName: "xmark")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(Color(red: 0.70, green: 0.28, blue: 0.24))
-        default:
-            Image(systemName: "minus")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.secondary)
-        }
     }
 }
 

@@ -172,6 +172,104 @@ struct EngineDownOverlay: View {
     }
 }
 
+struct ActivityView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 10) {
+                WhooshMark()
+                    .frame(width: 28, height: 28)
+                Text("Activity")
+                    .font(.system(size: 18, weight: .semibold))
+                Spacer()
+                Button("Clear History", action: model.clearActivity)
+                    .buttonStyle(.bordered)
+                    .disabled(!model.canClearActivity)
+            }
+
+            if model.activity.isEmpty {
+                Text("Transfers show up here.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.activity) { item in
+                            ActivityRow(item: item)
+                            if item.id != model.activity.last?.id {
+                                Divider().opacity(0.4)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 460, maxWidth: .infinity, minHeight: 420, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.canvas)
+    }
+}
+
+private struct ActivityRow: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.colorScheme) private var scheme
+    var item: ActivityItem
+
+    var body: some View {
+        HStack(spacing: 10) {
+            stateMark
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            if item.state == "done", !item.paths.isEmpty {
+                Button("Show") { model.showActivity(item) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var subtitle: String {
+        if let bytes = item.bytes, item.state == "done" {
+            return "\(item.detail) · \(humanSize(bytes))"
+        }
+        return item.detail
+    }
+
+    @ViewBuilder
+    private var stateMark: some View {
+        switch item.state {
+        case "working":
+            ProgressView().controlSize(.small)
+        case "done":
+            Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.signal(scheme))
+        case "failed":
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color(red: 0.70, green: 0.28, blue: 0.24))
+        default:
+            Image(systemName: "minus")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var draftName = ""

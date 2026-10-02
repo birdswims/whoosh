@@ -247,6 +247,14 @@ final class AppModel {
         NSWorkspace.shared.activateFileViewerSelecting(urls)
     }
 
+    var canClearActivity: Bool {
+        activity.contains { $0.state != "working" }
+    }
+
+    func clearActivity() {
+        activity.removeAll { $0.state != "working" }
+    }
+
     func copyFingerprint() {
         guard !fingerprint.isEmpty else { return }
         NSPasteboard.general.clearContents()
