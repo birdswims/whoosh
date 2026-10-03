@@ -14,6 +14,9 @@ use crate::approve::{approve_all, Approval, IncomingFile, TransferOffer};
 use crate::error::{Error, Result};
 use crate::mime::{kind_of_mime, sniff, MediaKind};
 use crate::paths::destination;
+use crate::progress::{
+    scale_bytes, ByteMeter, ByteProgress, FailHook, PeerProgressHook, ProgressGate,
+};
 
 #[derive(Clone)]
 pub struct AirdropConfig {
@@ -25,6 +28,10 @@ pub struct AirdropConfig {
     pub approve: Approval,
     /// Called after an upload is unpacked. The command-line receiver leaves this empty.
     pub on_saved: Option<crate::note::SavedHook>,
+    /// Called with the sender's name as the upload body arrives.
+    pub on_progress: Option<PeerProgressHook>,
+    /// Called when an accepted upload stops before the files are saved.
+    pub on_failed: Option<FailHook>,
 }
 
 impl AirdropConfig {
@@ -37,6 +44,8 @@ impl AirdropConfig {
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),
             on_saved: None,
+            on_progress: None,
+            on_failed: None,
         }
     }
 }
@@ -139,11 +148,23 @@ impl AirdropReceiver {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        // Acceptance lives on the receiver, shared by every connection. Only this
+        // connection's close should cancel the transfer it already accepted.
+        let mut waiting_for_upload = false;
         loop {
-            let request = match http::read_request(&mut socket, self.body_limit()).await {
-                Ok(request) => request,
-                Err(Error::Closed) => return Ok(()),
+            let mut head = match http::read_head(&mut socket).await {
+                Ok(head) => head,
+                Err(Error::Closed) => {
+                    if waiting_for_upload {
+                        self.fail_if_accepted("the sender closed the connection")
+                            .await;
+                    }
+                    return Ok(());
+                }
                 Err(error) => {
+                    if waiting_for_upload {
+                        self.fail_if_accepted(&error.to_string()).await;
+                    }
                     let _ = http::write_response(
                         &mut socket,
                         400,
@@ -155,8 +176,60 @@ impl AirdropReceiver {
                     return Err(error);
                 }
             };
+            let expecting_body = waiting_for_upload && head.path == "/Upload";
+            let meter = self.upload_meter(&head).await;
+            if let Err(error) = http::answer_continue(&mut socket, &head).await {
+                if expecting_body {
+                    self.fail_if_accepted(&error.to_string()).await;
+                }
+                return Err(error);
+            }
+            let limit = self.body_limit();
+            let body = match http::read_body(&mut socket, &mut head, limit, &|got, total| {
+                if let Some(meter) = &meter {
+                    meter.observe(got, total);
+                }
+            })
+            .await
+            {
+                Ok(body) => body,
+                Err(Error::Closed) => {
+                    if expecting_body {
+                        self.fail_if_accepted("the sender closed the upload").await;
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    if expecting_body {
+                        self.fail_if_accepted(&error.to_string()).await;
+                    }
+                    let _ = http::write_response(
+                        &mut socket,
+                        400,
+                        "Bad Request",
+                        "text/plain",
+                        error.to_string().as_bytes(),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            if let Some(meter) = &meter {
+                meter.finish();
+            }
+            let request = Request {
+                method: head.method,
+                path: head.path,
+                headers: head.headers,
+                body,
+            };
             let path = request.path.clone();
             let (status, reason, content_type, body) = self.dispatch(request).await;
+            if path == "/Ask" && status == 200 {
+                waiting_for_upload = true;
+            } else if path == "/Upload" {
+                waiting_for_upload = false;
+            }
             if status >= 400 {
                 tracing::warn!(%path, status, error = %String::from_utf8_lossy(&body), "AirDrop request failed");
             }
@@ -164,6 +237,34 @@ impl AirdropReceiver {
             if status >= 400 && status != 409 {
                 return Ok(());
             }
+        }
+    }
+
+    async fn upload_meter(&self, head: &http::Head) -> Option<Arc<ByteMeter>> {
+        if head.path != "/Upload" {
+            return None;
+        }
+        let pending = self.pending.lock().await;
+        if !pending.accepted {
+            return None;
+        }
+        let hook = self.config.on_progress.clone()?;
+        let peer = pending.peer.clone();
+        Some(ByteMeter::new(
+            0,
+            Arc::new(move |progress| hook(&peer, progress)),
+        ))
+    }
+
+    async fn fail_if_accepted(&self, message: &str) {
+        let mut pending = self.pending.lock().await;
+        if !pending.accepted {
+            return;
+        }
+        let peer = std::mem::take(&mut pending.peer);
+        *pending = Pending::default();
+        if let Some(hook) = &self.config.on_failed {
+            hook(&peer, message);
         }
     }
 
@@ -283,13 +384,9 @@ impl AirdropReceiver {
         ) {
             Ok(entries) => entries,
             Err(error) => {
-                *self.pending.lock().await = Pending::default();
-                return (
-                    400,
-                    "Bad Request",
-                    "text/plain",
-                    error.to_string().into_bytes(),
-                );
+                let message = error.to_string();
+                self.fail_if_accepted(&message).await;
+                return (400, "Bad Request", "text/plain", message.into_bytes());
             }
         };
         let count = entries.len();
@@ -302,21 +399,15 @@ impl AirdropReceiver {
                 match destination(&self.config.dir, &entry.name, kind, self.config.sort_media) {
                     Ok(dest) => dest,
                     Err(error) => {
-                        return (
-                            400,
-                            "Bad Request",
-                            "text/plain",
-                            error.to_string().into_bytes(),
-                        )
+                        let message = error.to_string();
+                        self.fail_if_accepted(&message).await;
+                        return (400, "Bad Request", "text/plain", message.into_bytes());
                     }
                 };
             if let Err(error) = tokio::fs::write(&dest, &entry.bytes).await {
-                return (
-                    500,
-                    "Server Error",
-                    "text/plain",
-                    error.to_string().into_bytes(),
-                );
+                let message = error.to_string();
+                self.fail_if_accepted(&message).await;
+                return (500, "Server Error", "text/plain", message.into_bytes());
             }
             paths.push(dest.display().to_string());
         }
@@ -365,7 +456,7 @@ pub async fn send_tls(
     files: &[(String, Vec<u8>)],
     connector: tokio_rustls::TlsConnector,
 ) -> Result<()> {
-    send_tls_with_progress(addr, sender_name, files, connector, &|_| {}).await
+    send_tls_reporting(addr, sender_name, files, connector, &|_| {}, &|_| {}).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +475,17 @@ pub async fn send_tls_with_progress(
     connector: tokio_rustls::TlsConnector,
     progress: &(dyn Fn(SendProgress) + Send + Sync),
 ) -> Result<()> {
+    send_tls_reporting(addr, sender_name, files, connector, progress, &|_| {}).await
+}
+
+pub async fn send_tls_reporting(
+    addr: std::net::SocketAddr,
+    sender_name: &str,
+    files: &[(String, Vec<u8>)],
+    connector: tokio_rustls::TlsConnector,
+    progress: &(dyn Fn(SendProgress) + Send + Sync),
+    bytes: &(dyn Fn(ByteProgress) + Send + Sync),
+) -> Result<()> {
     progress(SendProgress::Connecting);
     let socket = connect_for_send(addr).await?;
     progress(SendProgress::SecuringConnection);
@@ -398,7 +500,7 @@ pub async fn send_tls_with_progress(
         )
     })?
     .map_err(|error| Error::crypto(error.to_string()))?;
-    send_session(&mut socket, addr, sender_name, files, progress).await
+    send_session(&mut socket, addr, sender_name, files, progress, bytes).await
 }
 
 pub async fn send_plain(
@@ -406,8 +508,19 @@ pub async fn send_plain(
     sender_name: &str,
     files: &[(String, Vec<u8>)],
 ) -> Result<()> {
+    send_plain_reporting(addr, sender_name, files, &|_| {}, &|_| {}).await
+}
+
+pub async fn send_plain_reporting(
+    addr: std::net::SocketAddr,
+    sender_name: &str,
+    files: &[(String, Vec<u8>)],
+    progress: &(dyn Fn(SendProgress) + Send + Sync),
+    bytes: &(dyn Fn(ByteProgress) + Send + Sync),
+) -> Result<()> {
+    progress(SendProgress::Connecting);
     let mut socket = connect_for_send(addr).await?;
-    send_session(&mut socket, addr, sender_name, files, &|_| {}).await
+    send_session(&mut socket, addr, sender_name, files, progress, bytes).await
 }
 
 async fn connect_for_send(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
@@ -428,6 +541,7 @@ async fn send_session<S>(
     sender_name: &str,
     files: &[(String, Vec<u8>)],
     progress: &(dyn Fn(SendProgress) + Send + Sync),
+    bytes: &(dyn Fn(ByteProgress) + Send + Sync),
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -509,12 +623,24 @@ where
     tracing::info!(%addr, "AirDrop request accepted; uploading files");
     progress(SendProgress::Uploading);
     let archive = protocol::build_upload(files)?;
+    let file_total: u64 = files.iter().map(|(_, data)| data.len() as u64).sum();
+    let archive_len = archive.len() as u64;
+    let mut gate = ProgressGate::new(file_total);
+    gate.start(bytes);
     let response = timeout(
         Duration::from_secs(600),
-        post(socket, "/Upload", host, "application/x-cpio", &archive),
+        post_reporting(
+            socket,
+            "/Upload",
+            host,
+            "application/x-cpio",
+            &archive,
+            &mut |written| gate.observe(scale_bytes(written, archive_len, file_total), bytes),
+        ),
     )
     .await
     .map_err(|_| Error::protocol("AirDrop upload timed out; delivery could not be confirmed."))??;
+    gate.finish(bytes);
     if response.status != 200 {
         return Err(Error::protocol(format!(
             "the AirDrop device did not take the file ({})",
@@ -643,6 +769,20 @@ async fn post<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    post_reporting(io, path, host, content_type, body, &mut |_| {}).await
+}
+
+async fn post_reporting<S>(
+    io: &mut S,
+    path: &str,
+    host: &str,
+    content_type: &str,
+    body: &[u8],
+    on_written: &mut (dyn FnMut(u64) + Send),
+) -> Result<StatusResponse>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // AirDrop/1.0 is the sender identity sharingd expects. Advertising
     // Accept-Encoding makes some iPhones compress the reply, which this
     // parser would then treat as a failed plist.
@@ -651,7 +791,15 @@ where
         body.len()
     );
     io.write_all(head.as_bytes()).await?;
-    io.write_all(body).await?;
+    let mut written = 0u64;
+    if !body.is_empty() {
+        on_written(0);
+    }
+    for chunk in body.chunks(256 * 1024) {
+        io.write_all(chunk).await?;
+        written += chunk.len() as u64;
+        on_written(written);
+    }
     io.flush().await?;
     let response = http::read_request(io, 1024 * 1024).await?;
     // `read_request` parses a response poorly because it expects a request line.
@@ -694,6 +842,7 @@ mod tests {
                 "Mac",
                 &[],
                 &|stage| observed.lock().unwrap().push(stage),
+                &|_| {},
             )
             .await
             .unwrap_err()
@@ -943,5 +1092,60 @@ mod tests {
         assert!(error.to_string().contains("409") || error.to_string().contains("ask"));
         let _ = server.await;
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn reports_upload_progress() {
+        use crate::progress::ByteProgress;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let received = Arc::new(Mutex::new(Vec::<ByteProgress>::new()));
+        let log = received.clone();
+        let mut config = AirdropConfig::auto(dir.path());
+        config.on_progress = Some(Arc::new(move |_peer, progress| {
+            log.lock().unwrap().push(progress);
+        }));
+        let receiver = AirdropReceiver::new(config);
+        let server = tokio::spawn(async move { receiver.accept_one(listener).await });
+        let mut payload = vec![0u8; 300 * 1024];
+        let mut state = 0x1234_5678u32;
+        for byte in &mut payload {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 16) as u8;
+        }
+        let sent = Arc::new(Mutex::new(Vec::<ByteProgress>::new()));
+        let sent_log = sent.clone();
+        super::send_plain_reporting(
+            addr,
+            "iPhone",
+            &[("blob.bin".into(), payload.clone())],
+            &|_| {},
+            &|progress| sent_log.lock().unwrap().push(progress),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap().unwrap();
+        let sent = sent.lock().unwrap().clone();
+        let received = received.lock().unwrap().clone();
+        assert!(sent.len() >= 2, "{sent:?}");
+        assert_eq!(sent.first().unwrap().transferred, 0);
+        assert_eq!(sent.last().unwrap().transferred, payload.len() as u64);
+        assert_eq!(sent.last().unwrap().total, payload.len() as u64);
+        assert!(sent
+            .windows(2)
+            .all(|pair| pair[0].transferred <= pair[1].transferred));
+        assert!(received.len() >= 2, "{received:?}");
+        let last = *received.last().unwrap();
+        assert!(last.total > 256 * 1024, "{received:?}");
+        assert_eq!(last.transferred, last.total);
+        assert!(received
+            .windows(2)
+            .all(|pair| pair[0].transferred <= pair[1].transferred));
+        assert_eq!(std::fs::read(dir.path().join("blob.bin")).unwrap(), payload);
     }
 }

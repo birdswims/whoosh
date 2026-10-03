@@ -39,13 +39,25 @@
             </ListView.ItemContainerStyle>
             <ListView.ItemTemplate>
                 <DataTemplate>
-                    <Grid ColumnSpacing="10">
+                    <Grid ColumnSpacing="10" RowSpacing="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="20" />
+                            <ColumnDefinition Width="36" />
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <ProgressRing Width="16" Height="16" IsActive="True" Visibility="{Binding IsWorking, Converter={StaticResource Vis}}" />
+                        <ProgressRing Width="16" Height="16" HorizontalAlignment="Left" IsActive="True" Visibility="{Binding ShowSpinner, Converter={StaticResource Vis}}" />
+                        <TextBlock
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center"
+                            FontSize="11"
+                            FontWeight="SemiBold"
+                            Foreground="{ThemeResource WhooshSignalBrush}"
+                            Text="{Binding PercentLabel}"
+                            Visibility="{Binding ShowDeterminate, Converter={StaticResource Vis}}" />
                         <FontIcon FontSize="12" Foreground="{ThemeResource WhooshSignalBrush}" Glyph="&#xE73E;" Visibility="{Binding IsDone, Converter={StaticResource Vis}}" />
                         <FontIcon FontSize="12" Foreground="#FFB3473C" Glyph="&#xE711;" Visibility="{Binding IsFailed, Converter={StaticResource Vis}}" />
                         <FontIcon FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE738;" Visibility="{Binding IsOther, Converter={StaticResource Vis}}" />
@@ -61,6 +73,14 @@
                             Style="{StaticResource SubtleButtonStyle}"
                             Tag="{Binding}"
                             Visibility="{Binding CanShow, Converter={StaticResource Vis}}" />
+                        <ProgressBar
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            Maximum="100"
+                            Value="{Binding Percent}"
+                            IsIndeterminate="{Binding ShowIndeterminate}"
+                            Foreground="{ThemeResource WhooshSignalBrush}"
+                            Visibility="{Binding ShowProgress, Converter={StaticResource Vis}}" />
                     </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>

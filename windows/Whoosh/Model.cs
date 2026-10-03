@@ -57,12 +57,12 @@ public sealed class ActivityItem : Observable
         set
         {
             Set(ref _state, value);
-            Raise(nameof(Subtitle));
             Raise(nameof(CanShow));
             Raise(nameof(IsWorking));
             Raise(nameof(IsDone));
             Raise(nameof(IsFailed));
             Raise(nameof(IsOther));
+            RaiseProgress();
         }
     }
 
@@ -91,16 +91,94 @@ public sealed class ActivityItem : Observable
         set
         {
             Set(ref _bytes, value);
-            Raise(nameof(Subtitle));
+            RaiseProgress();
         }
     }
 
-    public string Subtitle => Bytes is ulong bytes && State == "done" ? $"{Detail} · {Format.Size(bytes)}" : Detail;
+    ulong? _total;
+    public ulong? Total
+    {
+        get => _total;
+        set
+        {
+            Set(ref _total, value);
+            RaiseProgress();
+        }
+    }
+
+    public string Subtitle
+    {
+        get
+        {
+            if (State == "done" && Bytes is ulong doneBytes)
+            {
+                return $"{Detail} · {Format.Size(doneBytes)}";
+            }
+
+            if (State == "working" && Total is ulong total && total > 0)
+            {
+                var transferred = Math.Min(Bytes ?? 0, total);
+                var pct = transferred * 100 / total;
+                return $"{Detail} · {Format.Size(transferred)} of {Format.Size(total)} · {pct}%";
+            }
+
+            if (State == "working" && Bytes is ulong bytes && bytes > 0)
+            {
+                return $"{Detail} · {Format.Size(bytes)}";
+            }
+
+            return Detail;
+        }
+    }
+
     public bool CanShow => State == "done" && Paths.Count > 0;
     public bool IsWorking => State == "working";
     public bool IsDone => State == "done";
     public bool IsFailed => State == "failed";
     public bool IsOther => !IsWorking && !IsDone && !IsFailed;
+    public bool ShowDeterminate => IsWorking && Total is ulong total && total > 0;
+    public bool ShowIndeterminate => IsWorking && !ShowDeterminate && Bytes is ulong bytes && bytes > 0;
+    public bool ShowSpinner => IsWorking && !ShowDeterminate && !ShowIndeterminate;
+    public bool ShowProgress => ShowDeterminate || ShowIndeterminate;
+
+    public double Percent
+    {
+        get
+        {
+            if (Total is not ulong total || total == 0)
+            {
+                return 0;
+            }
+
+            var transferred = Math.Min(Bytes ?? 0, total);
+            return transferred * 100.0 / total;
+        }
+    }
+
+    public string PercentLabel
+    {
+        get
+        {
+            if (Total is not ulong total || total == 0)
+            {
+                return "";
+            }
+
+            var transferred = Math.Min(Bytes ?? 0, total);
+            return $"{transferred * 100 / total}%";
+        }
+    }
+
+    void RaiseProgress()
+    {
+        Raise(nameof(Subtitle));
+        Raise(nameof(ShowDeterminate));
+        Raise(nameof(ShowIndeterminate));
+        Raise(nameof(ShowSpinner));
+        Raise(nameof(ShowProgress));
+        Raise(nameof(Percent));
+        Raise(nameof(PercentLabel));
+    }
 
     public static ActivityItem From(WireEvent ev)
     {
@@ -114,6 +192,7 @@ public sealed class ActivityItem : Observable
             Peer = ev.Peer ?? "",
             Via = ev.Via ?? "",
             Bytes = ev.Bytes,
+            Total = ev.Total,
         };
         if (ev.Paths != null)
         {
@@ -158,6 +237,11 @@ public sealed class ActivityItem : Observable
         if (ev.Bytes != null)
         {
             Bytes = ev.Bytes;
+        }
+
+        if (ev.Total != null)
+        {
+            Total = ev.Total;
         }
 
         if (ev.Paths is { Count: > 0 })
@@ -295,8 +379,8 @@ public sealed class AppModel : Observable
 
             if (Sending)
             {
-                var active = Activity.FirstOrDefault(item => item.Direction == "out" && item.State == "working");
-                return string.IsNullOrEmpty(active?.Detail) ? "Preparing transfer…" : active.Detail;
+                var active = Outgoing;
+                return string.IsNullOrEmpty(active?.Subtitle) ? "Preparing transfer…" : active.Subtitle;
             }
 
             if (peer.Via == "whoosh" && !peer.Trusted)
@@ -1095,7 +1179,38 @@ public sealed class AppModel : Observable
         Raise(nameof(HasOffer));
         Raise(nameof(HasTrust));
         Raise(nameof(HasActivity));
+        Raise(nameof(ShowSendProgress));
+        Raise(nameof(ShowSendIndeterminate));
+        Raise(nameof(SendPercent));
+        Raise(nameof(ShowReceiveProgress));
+        Raise(nameof(ShowReceiveBar));
+        Raise(nameof(ShowReceiveIndeterminate));
+        Raise(nameof(ReceivePercent));
+        Raise(nameof(ReceiveTitle));
+        Raise(nameof(ReceiveProgressText));
     }
+
+    ActivityItem? Outgoing => Activity.FirstOrDefault(item => item.Direction == "out" && item.State == "working");
+
+    ActivityItem? Incoming => Activity.FirstOrDefault(item => item.Direction == "in" && item.State == "working");
+
+    public bool ShowSendProgress => Sending && Outgoing is { } item && item.ShowProgress;
+
+    public bool ShowSendIndeterminate => Sending && Outgoing?.ShowIndeterminate == true;
+
+    public double SendPercent => Outgoing?.Percent ?? 0;
+
+    public bool ShowReceiveProgress => Incoming != null;
+
+    public bool ShowReceiveBar => Incoming?.ShowProgress == true;
+
+    public bool ShowReceiveIndeterminate => Incoming?.ShowIndeterminate == true;
+
+    public double ReceivePercent => Incoming?.Percent ?? 0;
+
+    public string ReceiveTitle => Incoming?.Title ?? "";
+
+    public string ReceiveProgressText => Incoming?.Subtitle ?? "";
 
     void WriteSettings()
     {

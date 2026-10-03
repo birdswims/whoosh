@@ -193,6 +193,9 @@ public sealed class WireEvent
     [JsonPropertyName("bytes")]
     public ulong? Bytes { get; set; }
 
+    [JsonPropertyName("total")]
+    public ulong? Total { get; set; }
+
     [JsonPropertyName("paths")]
     public List<string>? Paths { get; set; }
 }

@@ -46,6 +46,14 @@ final class AppModel {
     var thumbnails: [String: NSImage] = [:]
     var outgoingPin = ""
     var activity: [ActivityItem] = []
+
+    var liveOutgoing: ActivityItem? {
+        activity.first { $0.direction == "out" && $0.state == "working" }
+    }
+
+    var incomingNow: [ActivityItem] {
+        Array(activity.filter { $0.direction == "in" && $0.state == "working" }.prefix(3))
+    }
     var currentOffer: Offer?
     var trustPeer: Peer?
     var banner: String?
@@ -282,9 +290,9 @@ final class AppModel {
         let id = UUID().uuidString
         let count = files.count
         let title = count == 1 ? "Sending 1 file" : "Sending \(count) files"
-        func event(_ state: String, _ title: String, _ detail: String, bytes: UInt64? = nil) -> WireEvent {
+        func event(_ state: String, _ title: String, _ detail: String, bytes: UInt64? = nil, total: UInt64? = nil) -> WireEvent {
             WireEvent(ev: "activity", id: id, via: "airdrop", peer: peer.name,
-                      direction: "out", state: state, title: title, detail: detail, bytes: bytes)
+                      direction: "out", state: state, title: title, detail: detail, bytes: bytes, total: total)
         }
         guard let target = peer.airdropTarget else {
             record(event("failed", "Could not send", "The device's AirDrop details are unavailable. Refresh nearby devices and try again."))
@@ -298,10 +306,10 @@ final class AppModel {
                 self.record(event("working", title, "preparing files for \(peer.name)"))
             case .requestingAcceptance:
                 self.record(event("working", title, "requesting acceptance on \(peer.name)"))
-            case .transferring(let bytes, _):
-                self.record(event("working", title, "transferring to \(peer.name)", bytes: bytes))
+            case .transferring(let bytes, let total):
+                self.record(event("working", title, "transferring to \(peer.name)", bytes: bytes, total: total))
             case .completed(let bytes):
-                self.record(event("done", count == 1 ? "Sent 1 file" : "Sent \(count) files", "to \(peer.name)", bytes: bytes))
+                self.record(event("done", count == 1 ? "Sent 1 file" : "Sent \(count) files", "to \(peer.name)", bytes: bytes, total: bytes))
             case .failed(let message):
                 self.record(event("failed", "Could not send", message))
             case .cancelled:

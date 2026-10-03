@@ -33,6 +33,7 @@ use crate::native::{
 };
 use crate::net::{self, awdl_listeners, bind_airdrop_listener};
 use crate::note::{SavedHook, SavedNote};
+use crate::progress::{ByteProgress, ProgressHook};
 use crate::quickshare::{
     self, random_endpoint_id, service_instance_name, EndpointInfo, QuickshareConfig, DEVICE_LAPTOP,
     SERVICE_TYPE as QUICKSHARE,
@@ -183,6 +184,13 @@ struct Listed {
     airdrop_target: Option<Value>,
 }
 
+struct LiveReceive {
+    id: String,
+    via: String,
+    peer: String,
+    files: usize,
+}
+
 struct Host {
     config: Config,
     cert_der: Vec<u8>,
@@ -191,6 +199,7 @@ struct Host {
     runtime: Option<Runtime>,
     warnings: Vec<String>,
     offers: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    incoming: Arc<Mutex<Vec<LiveReceive>>>,
     filter: Arc<Mutex<Filter>>,
 }
 
@@ -282,6 +291,7 @@ async fn serve(
         runtime: None,
         warnings: Vec::new(),
         offers: Arc::new(Mutex::new(HashMap::new())),
+        incoming: Arc::new(Mutex::new(Vec::new())),
         filter: Arc::new(Mutex::new(Filter::default())),
     };
     emit.event(json!({
@@ -440,7 +450,7 @@ async fn start(host: &mut Host, emit: &Emit) -> Result<()> {
     host.stop_runtime();
     tokio::fs::create_dir_all(&host.config.dir).await?;
     let cancel = CancellationToken::new();
-    let approve = gui_approval(host.offers.clone(), emit.clone());
+    let approve = gui_approval(host.offers.clone(), host.incoming.clone(), emit.clone());
     let mut tasks = Vec::new();
     let mut adverts = Vec::new();
     let mut warnings = Vec::new();
@@ -561,11 +571,13 @@ async fn start_native(
             None
         }
     };
+    let incoming = host.incoming.clone();
     let options = ReceiveOptions {
         dir: host.config.dir.clone(),
         sort_media: host.config.sort_media,
         max_file_bytes: host.config.max_file_bytes,
         approve,
+        on_progress: Some(receive_progress(emit, incoming.clone(), "whoosh")),
     };
     let task_emit = emit.clone();
     let task = tokio::spawn(async move {
@@ -573,6 +585,7 @@ async fn start_native(
             tokio::select! {
                 result = listener.receive_one(options.clone()) => match result {
                     Ok(report) => {
+                        let id = finish_live(&incoming, "whoosh", &report.peer);
                         let paths = report
                             .files
                             .iter()
@@ -580,7 +593,7 @@ async fn start_native(
                             .collect();
                         activity(
                             &task_emit,
-                            &random_id(),
+                            &id,
                             "in",
                             "done",
                             &files_phrase(report.files.len(), "Received"),
@@ -588,10 +601,27 @@ async fn start_native(
                             &report.peer,
                             "whoosh",
                             Some(report.bytes),
+                            Some(report.bytes),
                             Some(paths),
                         );
                     }
-                    Err(Error::Rejected(_) | Error::Closed) => {}
+                    Err(Error::Rejected(_) | Error::Closed) => {
+                        if let Some(id) = take_live(&incoming, "whoosh", "") {
+                            activity(
+                                &task_emit,
+                                &id,
+                                "in",
+                                "failed",
+                                "Transfer stopped",
+                                "The transfer stopped.",
+                                "",
+                                "whoosh",
+                                None,
+                                None,
+                                None,
+                            );
+                        }
+                    }
                     Err(Error::Pin) => activity(
                         &task_emit,
                         &random_id(),
@@ -603,19 +633,24 @@ async fn start_native(
                         "whoosh",
                         None,
                         None,
-                    ),
-                    Err(error) => activity(
-                        &task_emit,
-                        &random_id(),
-                        "in",
-                        "failed",
-                        "Transfer stopped",
-                        &error.to_string(),
-                        "",
-                        "whoosh",
-                        None,
                         None,
                     ),
+                    Err(error) => {
+                        let id = finish_live(&incoming, "whoosh", "");
+                        activity(
+                            &task_emit,
+                            &id,
+                            "in",
+                            "failed",
+                            "Transfer stopped",
+                            &error.to_string(),
+                            "",
+                            "whoosh",
+                            None,
+                            None,
+                            None,
+                        );
+                    }
                 },
                 _ = cancel.cancelled() => break,
             }
@@ -643,6 +678,7 @@ async fn start_quickshare(
             None
         }
     };
+    let incoming = host.incoming.clone();
     let config = QuickshareConfig {
         dir: host.config.dir.clone(),
         name: host.config.name.clone(),
@@ -650,7 +686,9 @@ async fn start_quickshare(
         max_file_bytes: host.config.max_file_bytes,
         approve,
         device_type: DEVICE_LAPTOP,
-        on_saved: Some(saved_hook(emit, "quickshare")),
+        on_saved: Some(saved_hook(emit, incoming.clone(), "quickshare")),
+        on_progress: Some(receive_progress(emit, incoming.clone(), "quickshare")),
+        on_failed: Some(fail_hook(emit, incoming, "quickshare")),
     };
     let task = tokio::spawn(async move {
         let _ = quickshare::serve(listener, config, cancel).await;
@@ -667,6 +705,7 @@ async fn start_airdrop(
     let listener = bind_airdrop_listener(SocketAddr::from(([0, 0, 0, 0], 0)))?;
     let port = listener.local_addr()?.port();
     let (acceptor, _) = server_acceptor()?;
+    let incoming = host.incoming.clone();
     let receiver = AirdropReceiver::new(AirdropConfig {
         dir: host.config.dir.clone(),
         name: host.config.name.clone(),
@@ -674,7 +713,9 @@ async fn start_airdrop(
         sort_media: host.config.sort_media,
         max_file_bytes: host.config.max_file_bytes,
         approve,
-        on_saved: Some(saved_hook(emit, "airdrop")),
+        on_saved: Some(saved_hook(emit, incoming.clone(), "airdrop")),
+        on_progress: Some(receive_progress(emit, incoming.clone(), "airdrop")),
+        on_failed: Some(fail_hook(emit, incoming, "airdrop")),
     });
     let mut tasks = Vec::new();
     let primary = receiver.clone();
@@ -717,9 +758,10 @@ async fn start_airdrop(
     Ok((tasks, advert, port, instance))
 }
 
-fn saved_hook(emit: &Emit, via: &'static str) -> SavedHook {
+fn saved_hook(emit: &Emit, incoming: Arc<Mutex<Vec<LiveReceive>>>, via: &'static str) -> SavedHook {
     let emit = emit.clone();
     Arc::new(move |saved: SavedNote| {
+        let id = finish_live(&incoming, via, &saved.peer);
         let detail = if saved.peer.is_empty() {
             protocol_label(via).to_string()
         } else {
@@ -727,7 +769,7 @@ fn saved_hook(emit: &Emit, via: &'static str) -> SavedHook {
         };
         activity(
             &emit,
-            &random_id(),
+            &id,
             "in",
             "done",
             &files_phrase(saved.files, "Received"),
@@ -735,17 +777,102 @@ fn saved_hook(emit: &Emit, via: &'static str) -> SavedHook {
             &saved.peer,
             via,
             Some(saved.bytes),
+            Some(saved.bytes),
             Some(saved.paths),
         );
     })
 }
 
+fn fail_hook(
+    emit: &Emit,
+    incoming: Arc<Mutex<Vec<LiveReceive>>>,
+    via: &'static str,
+) -> crate::progress::FailHook {
+    let emit = emit.clone();
+    Arc::new(move |peer, message| {
+        let id = finish_live(&incoming, via, peer);
+        activity(
+            &emit,
+            &id,
+            "in",
+            "failed",
+            "Transfer stopped",
+            message,
+            peer,
+            via,
+            None,
+            None,
+            None,
+        );
+    })
+}
+
+fn receive_progress(
+    emit: &Emit,
+    incoming: Arc<Mutex<Vec<LiveReceive>>>,
+    via: &'static str,
+) -> crate::progress::PeerProgressHook {
+    let emit = emit.clone();
+    Arc::new(move |peer, progress| {
+        let rows = incoming.lock().unwrap_or_else(|poison| poison.into_inner());
+        let Some(row) = rows.iter().rev().find(|row| live_match(row, via, peer)) else {
+            return;
+        };
+        let id = row.id.clone();
+        let files = row.files;
+        let shown = if row.peer.is_empty() {
+            peer.to_string()
+        } else {
+            row.peer.clone()
+        };
+        drop(rows);
+        let detail = if shown.is_empty() {
+            protocol_label(via).to_string()
+        } else {
+            format!("from {shown}")
+        };
+        activity(
+            &emit,
+            &id,
+            "in",
+            "working",
+            &files_phrase(files, "Receiving"),
+            &detail,
+            &shown,
+            via,
+            Some(progress.transferred),
+            some_total(progress.total),
+            None,
+        );
+    })
+}
+
+fn some_total(total: u64) -> Option<u64> {
+    (total > 0).then_some(total)
+}
+
+fn live_match(row: &LiveReceive, via: &str, peer: &str) -> bool {
+    row.via == via && (row.peer == peer || row.peer.is_empty() || peer.is_empty())
+}
+
+fn finish_live(incoming: &Mutex<Vec<LiveReceive>>, via: &str, peer: &str) -> String {
+    take_live(incoming, via, peer).unwrap_or_else(random_id)
+}
+
+fn take_live(incoming: &Mutex<Vec<LiveReceive>>, via: &str, peer: &str) -> Option<String> {
+    let mut rows = incoming.lock().unwrap_or_else(|poison| poison.into_inner());
+    let index = rows.iter().rposition(|row| live_match(row, via, peer))?;
+    Some(rows.remove(index).id)
+}
+
 fn gui_approval(
     offers: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    incoming: Arc<Mutex<Vec<LiveReceive>>>,
     emit: Emit,
 ) -> crate::approve::Approval {
     approval(move |offer: TransferOffer| {
         let offers = offers.clone();
+        let incoming = incoming.clone();
         let emit = emit.clone();
         async move {
             let id = random_id();
@@ -788,6 +915,16 @@ fn gui_approval(
                 "accepted": accepted,
             }));
             if accepted {
+                let total = offer.total_bytes();
+                incoming
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(LiveReceive {
+                        id: id.clone(),
+                        via: offer.protocol.to_string(),
+                        peer: offer.peer.clone(),
+                        files: offer.files.len(),
+                    });
                 activity(
                     &emit,
                     &id,
@@ -797,7 +934,8 @@ fn gui_approval(
                     &format!("from {}", offer.peer),
                     &offer.peer,
                     offer.protocol,
-                    Some(offer.total_bytes()),
+                    some_total(total).map(|_| 0),
+                    some_total(total),
                     None,
                 );
             } else {
@@ -810,6 +948,7 @@ fn gui_approval(
                     &format!("from {}", offer.peer),
                     &offer.peer,
                     offer.protocol,
+                    None,
                     None,
                     None,
                 );
@@ -895,8 +1034,9 @@ async fn run_send(job: SendJob, emit: Emit) {
         &job.via,
         None,
         None,
+        None,
     );
-    let progress = |stage| {
+    let stages = |stage| {
         let detail = match stage {
             airdrop::SendProgress::Connecting => format!("connecting to {}", job.peer_name),
             airdrop::SendProgress::SecuringConnection => {
@@ -919,10 +1059,30 @@ async fn run_send(job: SendJob, emit: Emit) {
             &job.via,
             None,
             None,
+            None,
         );
     };
-    match perform_send(&job, &progress).await {
-        Ok(bytes) => activity(
+    let bytes_emit = emit.clone();
+    let bytes_id = id.clone();
+    let bytes_peer = job.peer_name.clone();
+    let bytes_via = job.via.clone();
+    let bytes: ProgressHook = Arc::new(move |progress: ByteProgress| {
+        activity(
+            &bytes_emit,
+            &bytes_id,
+            "out",
+            "working",
+            &files_phrase(count, "Sending"),
+            &format!("to {bytes_peer}"),
+            &bytes_peer,
+            &bytes_via,
+            Some(progress.transferred),
+            some_total(progress.total),
+            None,
+        );
+    });
+    match perform_send(&job, &stages, &bytes).await {
+        Ok(sent) => activity(
             &emit,
             &id,
             "out",
@@ -931,7 +1091,8 @@ async fn run_send(job: SendJob, emit: Emit) {
             &format!("to {}", job.peer_name),
             &job.peer_name,
             &job.via,
-            Some(bytes),
+            Some(sent),
+            Some(sent),
             None,
         ),
         Err(error) => activity(
@@ -945,6 +1106,7 @@ async fn run_send(job: SendJob, emit: Emit) {
             &job.via,
             None,
             None,
+            None,
         ),
     }
 }
@@ -952,18 +1114,20 @@ async fn run_send(job: SendJob, emit: Emit) {
 async fn perform_send(
     job: &SendJob,
     progress: &(dyn Fn(airdrop::SendProgress) + Send + Sync),
+    bytes: &ProgressHook,
 ) -> Result<u64> {
     let addr = discover::parse_peer_addr(&job.target)
         .ok_or_else(|| Error::protocol("device address is invalid"))?;
     match job.via.as_str() {
         "whoosh" => {
             let trust = whoosh_trust(addr, job)?;
-            let report = native::send_files(
+            let report = native::send_files_with_progress(
                 addr,
                 &job.sender_name,
                 &job.files,
                 job.pin.as_deref(),
                 trust,
+                Arc::clone(bytes),
             )
             .await?;
             let fingerprint = job
@@ -977,19 +1141,33 @@ async fn perform_send(
             Ok(report.bytes)
         }
         "quickshare" => {
-            let done = quickshare::send_paths(addr, &job.sender_name, &job.files).await?;
+            let done = quickshare::send_paths_with_progress(
+                addr,
+                &job.sender_name,
+                &job.files,
+                Arc::clone(bytes),
+            )
+            .await?;
             Ok(done.bytes)
         }
         "airdrop" => {
-            let bytes = file_bytes(&job.files)?;
+            let total = file_bytes(&job.files)?;
             let paths = job.files.clone();
             let payloads = tokio::task::spawn_blocking(move || read_payloads(&paths))
                 .await
                 .map_err(|error| Error::protocol(error.to_string()))??;
             let connector = airdrop::interoperable_connector()?;
-            airdrop::send_tls_with_progress(addr, &job.sender_name, &payloads, connector, progress)
-                .await?;
-            Ok(bytes)
+            let hook = Arc::clone(bytes);
+            airdrop::send_tls_reporting(
+                addr,
+                &job.sender_name,
+                &payloads,
+                connector,
+                progress,
+                &|step| hook(step),
+            )
+            .await?;
+            Ok(total)
         }
         _ => Err(Error::protocol("unknown device")),
     }
@@ -1495,6 +1673,10 @@ impl Host {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
+        self.incoming
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
         let Some(runtime) = self.runtime.take() else {
             *self
                 .filter
@@ -1549,6 +1731,7 @@ fn activity(
     peer: &str,
     via: &str,
     bytes: Option<u64>,
+    total: Option<u64>,
     paths: Option<Vec<String>>,
 ) {
     emit.event(json!({
@@ -1561,6 +1744,7 @@ fn activity(
         "peer": peer,
         "via": via,
         "bytes": bytes,
+        "total": total,
         "paths": paths.unwrap_or_default(),
     }));
 }
@@ -2301,7 +2485,35 @@ mod tests {
             .expect("send timed out")
             .unwrap()
             .expect("send failed");
-        assert_eq!(report.bytes, b"hello from whoosh".len() as u64);
+        let file_len = b"hello from whoosh".len() as u64;
+        assert_eq!(report.bytes, file_len);
+        let progress = events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .iter()
+            .filter(|event| {
+                event.get("ev").and_then(Value::as_str) == Some("activity")
+                    && event.get("direction").and_then(Value::as_str) == Some("in")
+                    && event.get("state").and_then(Value::as_str) == Some("working")
+                    && event.get("total").and_then(Value::as_u64) == Some(file_len)
+            })
+            .filter_map(|event| event.get("bytes").and_then(Value::as_u64))
+            .max();
+        assert_eq!(progress, Some(file_len));
+        let saved_event = wait_for(&events, |event| {
+            event.get("ev").and_then(Value::as_str) == Some("activity")
+                && event.get("direction").and_then(Value::as_str) == Some("in")
+                && event.get("state").and_then(Value::as_str) == Some("done")
+        })
+        .await;
+        assert_eq!(
+            saved_event.get("bytes").and_then(Value::as_u64),
+            Some(file_len)
+        );
+        assert_eq!(
+            saved_event.get("id").and_then(Value::as_str),
+            Some(offer_id.as_str())
+        );
         let saved = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if std::fs::read(inbox.path().join("note.txt")).ok().as_deref()

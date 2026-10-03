@@ -218,55 +218,76 @@ private struct ActivityRow: View {
     var item: ActivityItem
 
     var body: some View {
-        HStack(spacing: 10) {
-            stateMark
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                stateMark
+                    .frame(width: item.showsDeterminate ? 36 : 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Text(item.subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                if item.state == "done", !item.paths.isEmpty {
+                    Button("Show") { model.showActivity(item) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
-            Spacer(minLength: 8)
-            if item.state == "done", !item.paths.isEmpty {
-                Button("Show") { model.showActivity(item) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+            if item.showsProgress {
+                TransferBar(item: item)
             }
         }
         .padding(.vertical, 8)
     }
 
-    private var subtitle: String {
-        if let bytes = item.bytes, item.state == "done" {
-            return "\(item.detail) · \(humanSize(bytes))"
-        }
-        return item.detail
-    }
-
     @ViewBuilder
     private var stateMark: some View {
-        switch item.state {
-        case "working":
+        if item.showsDeterminate {
+            Text(item.progressLabel)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.signal(scheme))
+                .lineLimit(1)
+        } else if item.showsIndeterminate {
+            Color.clear.frame(width: 16, height: 16)
+        } else if item.state == "working" {
             ProgressView().controlSize(.small)
-        case "done":
+        } else if item.state == "done" {
             Image(systemName: "checkmark")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.signal(scheme))
-        case "failed":
+        } else if item.state == "failed" {
             Image(systemName: "xmark")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(Color(red: 0.70, green: 0.28, blue: 0.24))
-        default:
+        } else {
             Image(systemName: "minus")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+struct TransferBar: View {
+    @Environment(\.colorScheme) private var scheme
+    var item: ActivityItem
+
+    var body: some View {
+        Group {
+            if item.showsDeterminate {
+                ProgressView(value: item.percent)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+            }
+        }
+        .tint(Theme.signal(scheme))
     }
 }
 

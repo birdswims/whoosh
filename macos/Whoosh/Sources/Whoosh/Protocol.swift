@@ -1,5 +1,6 @@
 import Foundation
 import WhooshAirDrop
+import WhooshUI
 
 struct Command: Encodable {
     var id: String
@@ -72,6 +73,7 @@ struct WireEvent: Decodable {
     var title: String?
     var detail: String?
     var bytes: UInt64?
+    var total: UInt64? = nil
     var paths: [String]?
 }
 
@@ -106,7 +108,47 @@ struct ActivityItem: Identifiable, Equatable {
     var peer: String
     var via: String
     var bytes: UInt64?
+    var total: UInt64?
     var paths: [String]
+
+    var percent: Double {
+        guard let total, total > 0 else { return 0 }
+        return min(1, Double(bytes ?? 0) / Double(total))
+    }
+
+    var showsDeterminate: Bool {
+        state == "working" && (total ?? 0) > 0
+    }
+
+    var showsIndeterminate: Bool {
+        state == "working" && !showsDeterminate && (bytes ?? 0) > 0
+    }
+
+    var showsProgress: Bool {
+        showsDeterminate || showsIndeterminate
+    }
+
+    var progressLabel: String {
+        guard let total, total > 0 else { return "" }
+        let transferred = min(bytes ?? 0, total)
+        let pct = UInt64((Double(transferred) / Double(total) * 100).rounded(.down))
+        return "\(min(pct, 100))%"
+    }
+
+    var subtitle: String {
+        if state == "done", let bytes {
+            return "\(detail) · \(humanSize(bytes))"
+        }
+        if state == "working", let total, total > 0 {
+            let transferred = min(bytes ?? 0, total)
+            let pct = UInt64((Double(transferred) / Double(total) * 100).rounded(.down))
+            return "\(detail) · \(humanSize(transferred)) of \(humanSize(total)) · \(min(pct, 100))%"
+        }
+        if state == "working", let bytes, bytes > 0 {
+            return "\(detail) · \(humanSize(bytes))"
+        }
+        return detail
+    }
 
     init(_ event: WireEvent) {
         id = event.id ?? UUID().uuidString
@@ -117,6 +159,7 @@ struct ActivityItem: Identifiable, Equatable {
         peer = event.peer ?? ""
         via = event.via ?? ""
         bytes = event.bytes
+        total = event.total
         paths = event.paths ?? []
     }
 
@@ -131,6 +174,7 @@ struct ActivityItem: Identifiable, Equatable {
         if let value = event.peer { peer = value }
         if let value = event.via { via = value }
         if let value = event.bytes { bytes = value }
+        if let value = event.total { total = value }
         if let value = event.paths, !value.isEmpty { paths = value }
     }
 }

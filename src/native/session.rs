@@ -16,6 +16,7 @@ use crate::mime::{kind_of_mime, sniff};
 use crate::native::codec::{self, Control, FileOffer, Hello, Offer, MAGIC};
 use crate::native::tls::{self, client_config, server_config, IdentityCert, Trust};
 use crate::paths::{destination, partial_path};
+use crate::progress::{ByteMeter, PeerProgressHook, ProgressHook};
 use crate::sanitize::safe_file_name;
 
 const BUF: usize = 1024 * 1024;
@@ -27,6 +28,9 @@ pub struct ReceiveOptions {
     pub sort_media: bool,
     pub max_file_bytes: u64,
     pub approve: Approval,
+    /// Called with the sender's name as file bytes arrive. Empty for callers that
+    /// only need the finished report.
+    pub on_progress: Option<PeerProgressHook>,
 }
 
 impl ReceiveOptions {
@@ -36,6 +40,7 @@ impl ReceiveOptions {
             sort_media: false,
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),
+            on_progress: None,
         }
     }
 }
@@ -119,6 +124,17 @@ pub async fn send_files(
     pin: Option<&str>,
     trust: Trust,
 ) -> Result<SendReport> {
+    send_files_with_progress(addr, name, files, pin, trust, Arc::new(|_| {})).await
+}
+
+pub async fn send_files_with_progress(
+    addr: SocketAddr,
+    name: &str,
+    files: &[PathBuf],
+    pin: Option<&str>,
+    trust: Trust,
+    progress: ProgressHook,
+) -> Result<SendReport> {
     if files.is_empty() {
         return Err(Error::protocol("no files to send"));
     }
@@ -135,7 +151,7 @@ pub async fn send_files(
         .lock()
         .expect("fingerprint lock")
         .unwrap_or([0u8; 32]);
-    let report = handle_send(connection, name, files, pin).await?;
+    let report = handle_send(connection, name, files, pin, progress).await?;
     endpoint.wait_idle().await;
     Ok(SendReport {
         fingerprint,
@@ -149,6 +165,7 @@ async fn handle_send(
     name: &str,
     paths: &[PathBuf],
     pin: Option<&str>,
+    progress: ProgressHook,
 ) -> Result<SendReport> {
     let (mut send, mut recv) = connection
         .open_bi()
@@ -209,6 +226,8 @@ async fn handle_send(
         _ => return Err(Error::protocol("expected accept or reject")),
     }
 
+    let meter = ByteMeter::new(total, progress);
+    meter.start();
     let semaphore = Arc::new(Semaphore::new(4));
     let mut tasks = Vec::with_capacity(paths.len());
     for (offer, path) in offers.iter().zip(paths.iter()) {
@@ -220,8 +239,9 @@ async fn handle_send(
         let connection = connection.clone();
         let offer = offer.clone();
         let path = path.clone();
+        let meter = Arc::clone(&meter);
         tasks.push(tokio::spawn(async move {
-            let result = send_file(connection, &offer, &path).await;
+            let result = send_file(connection, &offer, &path, &meter).await;
             drop(permit);
             result
         }));
@@ -230,6 +250,7 @@ async fn handle_send(
         task.await
             .map_err(|error| Error::protocol(error.to_string()))??;
     }
+    meter.finish();
     match read_control(&mut recv).await? {
         Control::Done {
             transfer_id: done_id,
@@ -355,6 +376,14 @@ async fn handle_receive(
     )
     .await?;
 
+    let meter = options.on_progress.clone().map(|hook| {
+        let peer_name = peer.name.clone();
+        ByteMeter::new(total, Arc::new(move |progress| hook(&peer_name, progress)))
+    });
+    if let Some(meter) = &meter {
+        meter.start();
+    }
+
     let offers = Arc::new(
         offer
             .files
@@ -376,8 +405,9 @@ async fn handle_receive(
                 let dir = options.dir.clone();
                 let sort = options.sort_media;
                 let max = options.max_file_bytes;
+                let meter = meter.clone();
                 tokio::spawn(async move {
-                    let result = receive_file(stream, &offers, &dir, sort, max).await;
+                    let result = receive_file(stream, &offers, &dir, sort, max, meter).await;
                     let _ = tx.send(result).await;
                 });
             }
@@ -392,6 +422,9 @@ async fn handle_receive(
                 }
             }
         }
+    }
+    if let Some(meter) = &meter {
+        meter.finish();
     }
     write_control(
         &mut send,
@@ -409,7 +442,12 @@ async fn handle_receive(
     })
 }
 
-async fn send_file(connection: quinn::Connection, offer: &FileOffer, path: &Path) -> Result<()> {
+async fn send_file(
+    connection: quinn::Connection,
+    offer: &FileOffer,
+    path: &Path,
+    meter: &ByteMeter,
+) -> Result<()> {
     let mut send = connection
         .open_uni()
         .await
@@ -427,6 +465,7 @@ async fn send_file(connection: quinn::Connection, offer: &FileOffer, path: &Path
         hasher.update(&buffer[..read]);
         AsyncWriteExt::write_all(&mut send, &buffer[..read]).await?;
         sent += read as u64;
+        meter.add(read as u64);
     }
     if sent != offer.size {
         return Err(Error::protocol(format!(
@@ -446,6 +485,7 @@ async fn receive_file(
     dir: &Path,
     sort_media: bool,
     max_file_bytes: u64,
+    meter: Option<Arc<ByteMeter>>,
 ) -> Result<(PathBuf, u64)> {
     let mut header = [0u8; 12];
     error::read_exact(&mut recv, &mut header).await?;
@@ -476,6 +516,9 @@ async fn receive_file(
         hasher.update(&buffer[..read]);
         guard.file().write_all(&buffer[..read]).await?;
         left -= read as u64;
+        if let Some(meter) = &meter {
+            meter.add(read as u64);
+        }
     }
     let mut expected = [0u8; 32];
     error::read_exact(&mut recv, &mut expected).await?;
@@ -633,6 +676,7 @@ mod tests {
             } else {
                 approval(|_| async { false })
             },
+            on_progress: None,
         };
         let receive = tokio::spawn(async move { listener.receive_one(options).await });
         let send = send_files(addr, "sender", &paths, pin, Trust::Roots(cert)).await;
@@ -733,5 +777,54 @@ mod tests {
         .unwrap_err();
         assert!(!error.to_string().is_empty());
         receive.abort();
+    }
+
+    #[tokio::test]
+    async fn reports_byte_progress_for_send_and_receive() {
+        use super::send_files_with_progress;
+        use crate::progress::ByteProgress;
+        use std::sync::{Arc, Mutex};
+
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let path = source.path().join("clip.bin");
+        let size = 2 * 1024 * 1024 + 64;
+        std::fs::write(&path, vec![9u8; size]).unwrap();
+        let listener =
+            NativeListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), "receiver", None).unwrap();
+        let addr = listener.local_addr;
+        let cert = listener.cert_der.clone();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sent_log = Arc::clone(&sent);
+        let got_log = Arc::clone(&got);
+        let mut options = ReceiveOptions::auto(dest.path());
+        options.on_progress = Some(Arc::new(move |_peer, progress: ByteProgress| {
+            got_log.lock().unwrap().push(progress.transferred);
+        }));
+        let receive = tokio::spawn(async move { listener.receive_one(options).await });
+        let report = send_files_with_progress(
+            addr,
+            "sender",
+            &[path],
+            None,
+            Trust::Roots(cert),
+            Arc::new(move |progress| sent_log.lock().unwrap().push(progress.transferred)),
+        )
+        .await
+        .unwrap();
+        receive.await.unwrap().unwrap();
+        assert_eq!(report.bytes, size as u64);
+        assert_monotonic_end(&sent.lock().unwrap(), size as u64);
+        assert_monotonic_end(&got.lock().unwrap(), size as u64);
+    }
+
+    fn assert_monotonic_end(values: &[u64], total: u64) {
+        assert!(values.len() >= 2, "{values:?}");
+        assert!(
+            values.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{values:?}"
+        );
+        assert_eq!(*values.last().unwrap(), total);
     }
 }

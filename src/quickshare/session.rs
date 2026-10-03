@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
@@ -15,6 +16,7 @@ use crate::approve::{approve_all, Approval, IncomingFile, TransferOffer};
 use crate::error::{Error, Result};
 use crate::mime::{kind_of_mime, sniff, MediaKind};
 use crate::paths::{destination, partial_path};
+use crate::progress::{ByteMeter, FailHook, PeerProgressHook, ProgressHook};
 use crate::quickshare::endpoint::{self, EndpointInfo, DEVICE_LAPTOP};
 use crate::quickshare::secure::SecureChannel;
 use crate::quickshare::ukey2::{ClientHandshake, ServerHandshake};
@@ -33,6 +35,10 @@ pub struct QuickshareConfig {
     pub device_type: u8,
     /// Called after files are saved. The command-line receiver leaves this empty.
     pub on_saved: Option<crate::note::SavedHook>,
+    /// Called with the sender's name as file bytes arrive.
+    pub on_progress: Option<PeerProgressHook>,
+    /// Called when an accepted transfer stops before the files are saved.
+    pub on_failed: Option<FailHook>,
 }
 
 impl QuickshareConfig {
@@ -45,6 +51,8 @@ impl QuickshareConfig {
             approve: approve_all(),
             device_type: DEVICE_LAPTOP,
             on_saved: None,
+            on_progress: None,
+            on_failed: None,
         }
     }
 }
@@ -107,11 +115,20 @@ pub async fn accept_one(listener: TcpListener, config: QuickshareConfig) -> Resu
 }
 
 pub async fn send_paths(addr: SocketAddr, name: &str, paths: &[PathBuf]) -> Result<TransferDone> {
+    send_paths_with_progress(addr, name, paths, Arc::new(|_| {})).await
+}
+
+pub async fn send_paths_with_progress(
+    addr: SocketAddr,
+    name: &str,
+    paths: &[PathBuf],
+    progress: ProgressHook,
+) -> Result<TransferDone> {
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         files.push(Outgoing::open(path).await?);
     }
-    send_prepared(addr, name, files).await
+    send_prepared(addr, name, files, progress).await
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -124,13 +141,14 @@ pub(crate) async fn send_buffers(
         .into_iter()
         .map(|(name, bytes)| Outgoing::memory(name, bytes))
         .collect();
-    send_prepared(addr, name, prepared).await
+    send_prepared(addr, name, prepared, Arc::new(|_| {})).await
 }
 
 async fn send_prepared(
     addr: SocketAddr,
     name: &str,
     mut outgoing_files: Vec<Outgoing>,
+    progress: ProgressHook,
 ) -> Result<TransferDone> {
     let socket = timeout(Duration::from_secs(10), TcpStream::connect(addr))
         .await
@@ -190,6 +208,9 @@ async fn send_prepared(
     let mut index = 0usize;
     let mut assemblers: HashMap<i64, ByteBuf> = HashMap::new();
     let mut ticker = keepalive_ticker();
+    let total_bytes = outgoing_files.iter().map(|file| file.total).sum();
+    let meter = ByteMeter::new(total_bytes, progress);
+    let mut metering = false;
 
     loop {
         tokio::select! {
@@ -239,11 +260,22 @@ async fn send_prepared(
                 sent_intro = true;
             }
             _ = std::future::ready(()), if accepted && index < outgoing_files.len() => {
-                if send_next_chunk(&outgoing, &mut secure, &mut outgoing_files[index]).await? {
+                if !metering {
+                    meter.start();
+                    metering = true;
+                }
+                let before = outgoing_files[index].offset;
+                let finished = send_next_chunk(&outgoing, &mut secure, &mut outgoing_files[index]).await?;
+                meter.add(outgoing_files[index].offset.saturating_sub(before));
+                if finished {
                     index += 1;
                 }
             }
             _ = std::future::ready(()), if accepted && index >= outgoing_files.len() => {
+                if !metering {
+                    meter.start();
+                }
+                meter.finish();
                 let _ = send_secure(&outgoing, &mut secure, &conn::OfflineFrame::disconnect());
                 break;
             }
@@ -296,6 +328,22 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
     let mut secure = secrets.server_channel()?;
     send_bytes_payload(&outgoing, &mut secure, &paired_encryption())?;
 
+    let progress_hook: ProgressHook = match config.on_progress.clone() {
+        Some(hook) => {
+            let peer = peer_name.clone();
+            Arc::new(move |progress| hook(&peer, progress))
+        }
+        None => Arc::new(|_| {}),
+    };
+    let meter = ByteMeter::new(0, progress_hook);
+    let mut watch = TransferWatch {
+        accepted: false,
+        peer: peer_name.clone(),
+        hook: config.on_failed.clone(),
+        message: "the transfer stopped before the files were saved".into(),
+        armed: true,
+    };
+
     let mut got_key = false;
     let mut sent_result = false;
     let mut accepted = false;
@@ -315,7 +363,10 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
                     // The sender can close as soon as the last byte is out.
                     // The files are already on disk, so that close is success.
                     Err(_) if !files.is_empty() && files.values().all(|file| file.done) => break,
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        watch.message = error.to_string();
+                        return Err(error);
+                    }
                 };
                 let plain = secure.decrypt(&body)?;
                 let frame = decode_frame::<conn::OfflineFrame>(&plain)?;
@@ -336,7 +387,20 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
                     if !accepted {
                         return Err(Error::protocol("file bytes arrived before acceptance"));
                     }
-                    absorb_file(&config, &outgoing, &mut secure, &mut files, &mut done, transfer).await?;
+                    if let Err(error) = absorb_file(
+                        &config,
+                        &outgoing,
+                        &mut secure,
+                        &mut files,
+                        &mut done,
+                        &meter,
+                        transfer,
+                    )
+                    .await
+                    {
+                        watch.message = error.to_string();
+                        return Err(error);
+                    }
                     if !files.is_empty() && files.values().all(|file| file.done) {
                         break;
                     }
@@ -365,8 +429,12 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
                     if accepted {
                         if let Some(file) = files.get_mut(&payload_id) {
                             if file.kind_name == "text" {
-                                write_bytes_file(&config, file, &bytes).await?;
+                                if let Err(error) = write_bytes_file(&config, file, &bytes).await {
+                                    watch.message = error.to_string();
+                                    return Err(error);
+                                }
                                 file.done = true;
+                                meter.add(bytes.len() as u64);
                                 done.files.push(file.dest.clone());
                                 done.bytes += bytes.len() as u64;
                                 if files.values().all(|item| item.done) {
@@ -387,7 +455,13 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
                     break;
                 }
                 accepted = true;
+                watch.accepted = true;
                 done.accepted = true;
+                let total = files.values().map(|file| file.size).sum();
+                if total > 0 {
+                    meter.set_total(total);
+                }
+                meter.start();
             }
             _ = ticker.tick() => {
                 send_secure(&outgoing, &mut secure, &conn::OfflineFrame::keep_alive())?;
@@ -396,8 +470,31 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
     }
     drop(outgoing);
     let _ = writer_task.await;
+    watch.armed = false;
+    if accepted && !files.is_empty() && files.values().all(|file| file.done) {
+        meter.finish();
+    }
     done.peer = peer_name;
     Ok(done)
+}
+
+struct TransferWatch {
+    accepted: bool,
+    peer: String,
+    hook: Option<FailHook>,
+    message: String,
+    armed: bool,
+}
+
+impl Drop for TransferWatch {
+    fn drop(&mut self) {
+        if !self.armed || !self.accepted {
+            return;
+        }
+        if let Some(hook) = self.hook.take() {
+            hook(&self.peer, &self.message);
+        }
+    }
 }
 
 fn on_share_frame(
@@ -543,6 +640,7 @@ async fn absorb_file(
     secure: &mut SecureChannel,
     files: &mut HashMap<i64, InFile>,
     done: &mut TransferDone,
+    meter: &ByteMeter,
     transfer: conn::PayloadTransferFrame,
 ) -> Result<()> {
     let header = transfer
@@ -577,6 +675,7 @@ async fn absorb_file(
     if !body.is_empty() {
         file.partial.as_mut().unwrap().write(&body).await?;
         file.written += body.len() as u64;
+        meter.add(body.len() as u64);
     }
     let last = chunk.flags.unwrap_or(0) & conn::LAST_CHUNK != 0;
     if last {
@@ -1297,5 +1396,53 @@ mod tests {
             std::fs::read(dir.path().join("note.txt")).unwrap(),
             b"hello"
         );
+    }
+
+    #[tokio::test]
+    async fn reports_progress_across_chunks() {
+        use super::send_paths_with_progress;
+        use crate::progress::ByteProgress;
+        use std::sync::{Arc, Mutex};
+
+        let (listener, addr, dir) = pair().await;
+        let seen = Arc::new(Mutex::new(Vec::<ByteProgress>::new()));
+        let log = seen.clone();
+        let mut config = QuickshareConfig::auto(dir.path());
+        config.on_progress = Some(Arc::new(move |_peer, progress| {
+            log.lock().unwrap().push(progress);
+        }));
+        let server = tokio::spawn(async move { accept_one(listener, config).await });
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("blob.bin");
+        let payload = vec![7u8; 700 * 1024];
+        std::fs::write(&path, &payload).unwrap();
+        let sent = Arc::new(Mutex::new(Vec::<ByteProgress>::new()));
+        let sent_log = sent.clone();
+        let done = send_paths_with_progress(
+            addr,
+            "Phone",
+            &[path],
+            Arc::new(move |progress| sent_log.lock().unwrap().push(progress)),
+        )
+        .await
+        .unwrap();
+        let report = server.await.unwrap().unwrap();
+        assert!(report.accepted);
+        assert_eq!(report.bytes, payload.len() as u64);
+        assert_eq!(done.bytes, payload.len() as u64);
+        let sent = sent.lock().unwrap().clone();
+        let seen = seen.lock().unwrap().clone();
+        assert!(sent.len() >= 2, "{sent:?}");
+        assert_eq!(sent.first().unwrap().transferred, 0);
+        assert_eq!(sent.last().unwrap().transferred, payload.len() as u64);
+        assert_eq!(sent.last().unwrap().total, payload.len() as u64);
+        assert!(sent
+            .windows(2)
+            .all(|pair| pair[0].transferred <= pair[1].transferred));
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert_eq!(seen.last().unwrap().transferred, payload.len() as u64);
+        assert!(seen
+            .windows(2)
+            .all(|pair| pair[0].transferred <= pair[1].transferred));
     }
 }

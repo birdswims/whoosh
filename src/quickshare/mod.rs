@@ -16,4 +16,6 @@ pub use endpoint::{
     decode_b64, nearby_label, parse_instance_name, random_endpoint_id, service_instance_name,
     EndpointInfo, DEVICE_LAPTOP, SERVICE_TYPE,
 };
-pub use session::{accept_one, send_paths, serve, QuickshareConfig, TransferDone};
+pub use session::{
+    accept_one, send_paths, send_paths_with_progress, serve, QuickshareConfig, TransferDone,
+};

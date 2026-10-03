@@ -87,7 +87,7 @@ enum Snapshot {
         attachPreviews(model)
         model.activity = [
             ActivityItem(id: "1", direction: "in", state: "done", title: "Received 2 files", detail: "from Pixel", peer: "Pixel", via: "quickshare", bytes: 18_000_000, paths: ["/tmp/a.jpg"]),
-            ActivityItem(id: "2", direction: "out", state: "working", title: "Sending 1 file", detail: "to Office Mac", peer: "Office Mac", via: "whoosh", bytes: nil, paths: []),
+            ActivityItem(id: "2", direction: "out", state: "working", title: "Sending 1 file", detail: "to Office Mac", peer: "Office Mac", via: "whoosh", bytes: 12_000_000, total: 48_000_000, paths: []),
         ]
         return model
     }
@@ -143,7 +143,7 @@ private func attachPreviews(_ model: AppModel) {
 }
 
 extension ActivityItem {
-    init(id: String, direction: String, state: String, title: String, detail: String, peer: String, via: String, bytes: UInt64?, paths: [String]) {
+    init(id: String, direction: String, state: String, title: String, detail: String, peer: String, via: String, bytes: UInt64?, total: UInt64? = nil, paths: [String]) {
         self.id = id
         self.direction = direction
         self.state = state
@@ -152,6 +152,7 @@ extension ActivityItem {
         self.peer = peer
         self.via = via
         self.bytes = bytes
+        self.total = total
         self.paths = paths
     }
 }

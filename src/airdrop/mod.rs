@@ -15,8 +15,8 @@ mod tls;
 pub use tls::{client_connector, interoperable_connector, server_acceptor, server_name};
 
 pub use server::{
-    discover_receiver_name, send_plain, send_tls, send_tls_with_progress, AirdropConfig,
-    AirdropReceiver, SendProgress,
+    discover_receiver_name, send_plain, send_plain_reporting, send_tls, send_tls_reporting,
+    send_tls_with_progress, AirdropConfig, AirdropReceiver, SendProgress,
 };
 
 pub const SERVICE_TYPE: &str = "_airdrop._tcp.local.";

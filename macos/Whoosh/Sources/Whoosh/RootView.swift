@@ -20,6 +20,29 @@ struct RootView: View {
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                if !model.incomingNow.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.incomingNow) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.title)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
+                                Text(item.subtitle)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                if item.showsProgress {
+                                    TransferBar(item: item)
+                                } else {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack(alignment: .top, spacing: 14) {
                     SendCard(dropping: dropping)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -192,6 +215,9 @@ private struct SendCard: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if model.sending, let outgoing = model.liveOutgoing, outgoing.showsProgress {
+                TransferBar(item: outgoing)
+            }
             HStack {
                 Spacer()
                 PrimaryButton(title: model.sendTitle, enabled: model.canSend, action: model.send)
@@ -238,8 +264,7 @@ private struct SendCard: View {
             return "Choose a device nearby."
         }
         if model.sending {
-            return model.activity.first(where: { $0.direction == "out" && $0.state == "working" })?.detail
-                ?? "Preparing transfer…"
+            return model.liveOutgoing?.subtitle ?? "Preparing transfer…"
         }
         if peer.via == "whoosh", !peer.trusted {
             return "You confirm this device’s fingerprint before the first send."

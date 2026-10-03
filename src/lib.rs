@@ -16,6 +16,7 @@ pub mod native;
 pub mod net;
 mod note;
 pub mod paths;
+mod progress;
 pub mod quickshare;
 #[allow(unsafe_code)]
 pub mod radio;

@@ -15,6 +15,7 @@ use crate::native::{
     fingerprint_hex, NativeListener, ReceiveOptions, SERVICE_TYPE as NATIVE_SERVICE,
 };
 use crate::net::{awdl_listeners, bind_airdrop_listener, visibility_report};
+use crate::progress::ReceiveLog;
 use crate::quickshare::{
     random_endpoint_id, serve as serve_quickshare, service_instance_name, EndpointInfo,
     QuickshareConfig, DEVICE_LAPTOP, SERVICE_TYPE as QUICKSHARE_SERVICE,
@@ -72,6 +73,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 
     let mut tasks = Vec::new();
     let mut adverts = Vec::new();
+    let progress = ReceiveLog::new();
 
     if config.native {
         let listener = NativeListener::bind(
@@ -107,6 +109,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             sort_media: config.sort_media,
             max_file_bytes: config.max_file_bytes,
             approve: config.approve.clone(),
+            on_progress: Some(progress.hook("whoosh")),
         };
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
@@ -162,6 +165,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             approve: config.approve.clone(),
             device_type: DEVICE_LAPTOP,
             on_saved: None,
+            on_progress: Some(progress.hook("quickshare")),
+            on_failed: None,
         };
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
@@ -187,6 +192,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             max_file_bytes: config.max_file_bytes,
             approve: config.approve.clone(),
             on_saved: None,
+            on_progress: Some(progress.hook("airdrop")),
+            on_failed: None,
         });
         let cancel_air = cancel.clone();
         let primary = airdrop.clone();

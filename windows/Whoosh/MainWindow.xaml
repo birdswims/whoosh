@@ -87,15 +87,30 @@
             Severity="Error"
             Closed="Banner_Closed" />
 
-        <TextBlock
-            Grid.Row="2"
-            Margin="22,8,22,0"
-            FontSize="12"
-            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-            MaxLines="2"
-            Text="{Binding WarningsText}"
-            TextWrapping="Wrap"
-            Visibility="{Binding HasWarnings, Converter={StaticResource Vis}}" />
+        <StackPanel Grid.Row="2" Spacing="8">
+            <TextBlock
+                Margin="22,8,22,0"
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                MaxLines="2"
+                Text="{Binding WarningsText}"
+                TextWrapping="Wrap"
+                Visibility="{Binding HasWarnings, Converter={StaticResource Vis}}" />
+            <StackPanel Margin="22,8,22,0" Spacing="4" Visibility="{Binding ShowReceiveProgress, Converter={StaticResource Vis}}">
+                <TextBlock FontWeight="SemiBold" Text="{Binding ReceiveTitle}" TextTrimming="CharacterEllipsis" />
+                <TextBlock
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="{Binding ReceiveProgressText}"
+                    TextTrimming="CharacterEllipsis" />
+                <ProgressBar
+                    Maximum="100"
+                    Value="{Binding ReceivePercent}"
+                    IsIndeterminate="{Binding ShowReceiveIndeterminate}"
+                    Foreground="{ThemeResource WhooshSignalBrush}"
+                    Visibility="{Binding ShowReceiveBar, Converter={StaticResource Vis}}" />
+            </StackPanel>
+        </StackPanel>
 
         <Grid Grid.Row="3" Margin="18,12,18,8" ColumnSpacing="14">
             <Grid.ColumnDefinitions>
@@ -185,12 +200,19 @@
                         PlaceholderText="Pin, if they asked for one"
                         Text="{Binding OutgoingPin, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         Visibility="{Binding ShowOutgoingPin, Converter={StaticResource Vis}}" />
-                    <TextBlock
-                        Grid.Row="4"
-                        FontSize="12"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="{Binding Hint}"
-                        TextWrapping="WrapWholeWords" />
+                    <StackPanel Grid.Row="4" Spacing="6">
+                        <TextBlock
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="{Binding Hint}"
+                            TextWrapping="WrapWholeWords" />
+                        <ProgressBar
+                            Maximum="100"
+                            Value="{Binding SendPercent}"
+                            IsIndeterminate="{Binding ShowSendIndeterminate}"
+                            Foreground="{ThemeResource WhooshSignalBrush}"
+                            Visibility="{Binding ShowSendProgress, Converter={StaticResource Vis}}" />
+                    </StackPanel>
                     <Button
                         x:Name="SendButton"
                         Grid.Row="6"

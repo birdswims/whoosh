@@ -10,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::error::{self, Error, Result};
 
 const MAX_HEADERS: usize = 64 * 1024;
+const BODY_STEP: usize = 256 * 1024;
 
 #[derive(Debug)]
 pub struct Request {
@@ -19,12 +20,45 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
+pub(crate) struct Head {
+    pub method: String,
+    pub path: String,
+    pub headers: HashMap<String, String>,
+    pending: Vec<u8>,
+}
+
 pub async fn read_request<S>(io: &mut S, max_body: usize) -> Result<Request>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (head, mut pending) = read_headers(io).await?;
-    let mut lines = head.split("\r\n");
+    read_request_reporting(io, max_body, &|_, _| {}).await
+}
+
+pub(crate) async fn read_request_reporting<S>(
+    io: &mut S,
+    max_body: usize,
+    on_body: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<Request>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut head = read_head(io).await?;
+    answer_continue(io, &head).await?;
+    let body = read_body(io, &mut head, max_body, on_body).await?;
+    Ok(Request {
+        method: head.method,
+        path: head.path,
+        headers: head.headers,
+        body,
+    })
+}
+
+pub(crate) async fn read_head<S>(io: &mut S) -> Result<Head>
+where
+    S: AsyncRead + Unpin,
+{
+    let (raw, pending) = read_headers(io).await?;
+    let mut lines = raw.split("\r\n");
     let request_line = lines.next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts
@@ -48,35 +82,55 @@ where
         };
         headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
     }
-    if headers
+    Ok(Head {
+        method,
+        path,
+        headers,
+        pending,
+    })
+}
+
+pub(crate) async fn answer_continue<S>(io: &mut S, head: &Head) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    if head
+        .headers
         .get("expect")
         .is_some_and(|value| value.to_ascii_lowercase().contains("100-continue"))
     {
         io.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
         io.flush().await?;
     }
-    let body = if headers
+    Ok(())
+}
+
+pub(crate) async fn read_body<S>(
+    io: &mut S,
+    head: &mut Head,
+    max_body: usize,
+    on_body: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
+    if head
+        .headers
         .get("transfer-encoding")
         .is_some_and(|value| value.to_ascii_lowercase().contains("chunked"))
     {
-        read_chunked(io, &mut pending, max_body).await?
-    } else if let Some(length) = headers.get("content-length") {
+        return read_chunked(io, &mut head.pending, max_body, on_body).await;
+    }
+    if let Some(length) = head.headers.get("content-length") {
         let length: usize = length
             .parse()
             .map_err(|_| Error::protocol("bad content-length"))?;
         if length > max_body {
             return Err(Error::TooLarge);
         }
-        read_exact_pending(io, &mut pending, length).await?
-    } else {
-        pending
-    };
-    Ok(Request {
-        method,
-        path,
-        headers,
-        body,
-    })
+        return read_counted(io, &mut head.pending, length, on_body).await;
+    }
+    Ok(std::mem::take(&mut head.pending))
 }
 
 pub async fn write_response<S>(
@@ -132,23 +186,43 @@ where
     }
 }
 
-async fn read_exact_pending<S>(io: &mut S, pending: &mut Vec<u8>, length: usize) -> Result<Vec<u8>>
+async fn read_counted<S>(
+    io: &mut S,
+    pending: &mut Vec<u8>,
+    length: usize,
+    on_body: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<Vec<u8>>
 where
     S: AsyncRead + Unpin,
 {
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    let total = length as u64;
+    on_body(0, total);
     if pending.len() >= length {
         let extra = pending.split_off(length);
         let body = std::mem::replace(pending, extra);
+        on_body(body.len() as u64, total);
         return Ok(body);
     }
     let mut body = std::mem::take(pending);
-    let already = body.len();
-    body.resize(length, 0);
-    error::read_exact(io, &mut body[already..]).await?;
+    while body.len() < length {
+        let step = (length - body.len()).min(BODY_STEP);
+        let start = body.len();
+        body.resize(start + step, 0);
+        error::read_exact(io, &mut body[start..]).await?;
+        on_body(body.len() as u64, total);
+    }
     Ok(body)
 }
 
-async fn read_chunked<S>(io: &mut S, pending: &mut Vec<u8>, max_body: usize) -> Result<Vec<u8>>
+async fn read_chunked<S>(
+    io: &mut S,
+    pending: &mut Vec<u8>,
+    max_body: usize,
+    on_body: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<Vec<u8>>
 where
     S: AsyncRead + Unpin,
 {
@@ -175,6 +249,7 @@ where
         let mut chunk = vec![0u8; size];
         read_into(io, &mut incoming, &mut chunk).await?;
         output.extend_from_slice(&chunk);
+        on_body(output.len() as u64, 0);
         let crlf = read_line(io, &mut incoming).await?;
         if !crlf.is_empty() {
             return Err(Error::protocol("chunk is missing CRLF"));

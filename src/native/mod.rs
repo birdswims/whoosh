@@ -9,7 +9,9 @@ mod codec;
 mod session;
 mod tls;
 
-pub use session::{send_files, NativeListener, ReceiveOptions, ReceiveReport, SendReport};
+pub use session::{
+    send_files, send_files_with_progress, NativeListener, ReceiveOptions, ReceiveReport, SendReport,
+};
 pub use tls::{fingerprint_hex, generate_identity, identity_from_der, install_crypto, Trust};
 
 pub const SERVICE_TYPE: &str = "_whoosh._udp.local.";

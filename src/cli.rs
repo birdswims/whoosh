@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use crate::airdrop::{interoperable_connector, send_plain, send_tls};
+use crate::airdrop::{
+    interoperable_connector, send_plain_reporting, send_tls_reporting, SendProgress,
+};
 use crate::discover::{self, device_name};
 use crate::error::{Error, Result};
 use crate::native::{self, fingerprint_hex};
+use crate::progress::SendBar;
 use crate::quickshare::{self, SERVICE_TYPE as QUICKSHARE_SERVICE};
 use crate::service::{run, DaemonConfig};
 
@@ -182,8 +185,20 @@ pub async fn execute() -> Result<()> {
         } => {
             let addr = resolve_native(&to).await?;
             let trust = crate::trust::trust_for(&addr, trust_first)?;
-            let report =
-                native::send_files(addr, &device_name(), &files, pin.as_deref(), trust).await?;
+            let bar = SendBar::new(format!("to {to}"));
+            let hook = bar.hook();
+            bar.note(&format!("sending to {to}…"));
+            let report = native::send_files_with_progress(
+                addr,
+                &device_name(),
+                &files,
+                pin.as_deref(),
+                trust,
+                hook,
+            )
+            .await;
+            bar.finish();
+            let report = report?;
             if trust_first {
                 crate::trust::remember(&addr, &report.fingerprint)?;
             }
@@ -197,7 +212,13 @@ pub async fn execute() -> Result<()> {
         }
         Command::Quickshare { to, files } => {
             let addr = resolve_service(QUICKSHARE_SERVICE, &to).await?;
-            let done = quickshare::send_paths(addr, &device_name(), &files).await?;
+            let bar = SendBar::new(format!("to {to}"));
+            let hook = bar.hook();
+            bar.note(&format!("sending to {to}…"));
+            let done =
+                quickshare::send_paths_with_progress(addr, &device_name(), &files, hook).await;
+            bar.finish();
+            let done = done?;
             println!("sent {} bytes", done.bytes);
             Ok(())
         }
@@ -212,12 +233,30 @@ pub async fn execute() -> Result<()> {
                     .to_string();
                 payloads.push((name, std::fs::read(path)?));
             }
-            if http {
-                send_plain(addr, &device_name(), &payloads).await?;
+            let bar = SendBar::new(format!("to {to}"));
+            let hook = bar.hook();
+            let noted = bar.clone();
+            let peer = to.clone();
+            let stage = move |stage: SendProgress| note_airdrop(&noted, &peer, stage);
+            let result = if http {
+                send_plain_reporting(addr, &device_name(), &payloads, &stage, &|progress| {
+                    hook(progress)
+                })
+                .await
             } else {
                 let connector = interoperable_connector()?;
-                send_tls(addr, &device_name(), &payloads, connector).await?;
-            }
+                send_tls_reporting(
+                    addr,
+                    &device_name(),
+                    &payloads,
+                    connector,
+                    &stage,
+                    &|progress| hook(progress),
+                )
+                .await
+            };
+            bar.finish();
+            result?;
             println!("sent {} file(s)", payloads.len());
             Ok(())
         }
@@ -264,6 +303,17 @@ pub async fn execute() -> Result<()> {
         }
         Command::App => crate::appctl::run().await,
     }
+}
+
+fn note_airdrop(bar: &SendBar, peer: &str, stage: SendProgress) {
+    let text = match stage {
+        SendProgress::Connecting => format!("connecting to {peer}…"),
+        SendProgress::SecuringConnection => format!("securing connection to {peer}…"),
+        SendProgress::Discovering => format!("checking AirDrop on {peer}…"),
+        SendProgress::RequestingAcceptance => format!("waiting for {peer} to accept…"),
+        SendProgress::Uploading => return,
+    };
+    bar.note(&text);
 }
 
 async fn resolve_native(to: &str) -> Result<SocketAddr> {
