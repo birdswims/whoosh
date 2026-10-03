@@ -1,8 +1,8 @@
-//! JSON line control channel for the macOS app.
+//! JSON line control channel for the desktop apps.
 //!
 //! The app writes one command per line on stdin and reads one event per line
-//! on stdout. Tracing stays on stderr. On Unix, leftover listener logs are
-//! pointed at `/dev/null` so a `println` cannot split a JSON line.
+//! on stdout. Tracing stays on stderr. Listener logs are pointed at the null
+//! device so a `println` cannot split a JSON line.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -40,29 +40,42 @@ use crate::quickshare::{
 use crate::radio::Radio;
 use crate::trust;
 
+static SAVED_STDOUT: Mutex<Option<File>> = Mutex::new(None);
+
+/// Saves the current stdout handle and sends later `println` output to the null device.
+pub(crate) fn prepare_app_stdio() {
+    if let Ok(file) = detach_stdout() {
+        *SAVED_STDOUT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(file);
+    }
+}
+
+fn take_stdout() -> Result<File> {
+    if let Some(file) = SAVED_STDOUT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take()
+    {
+        return Ok(file);
+    }
+    detach_stdout()
+}
+
 pub async fn run() -> Result<()> {
-    #[cfg(not(unix))]
-    {
-        return Err(Error::protocol(
-            "the Whoosh app control channel requires macOS or Linux",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        let (tx, rx) = mpsc::unbounded_channel();
-        thread::spawn(move || read_commands(tx));
-        let emit = Emit::file(silence_stdout()?);
-        let config_dir = trust::config_dir()?;
-        serve(
-            rx,
-            emit,
-            ServeOptions {
-                config_dir,
-                watch: true,
-            },
-        )
-        .await
-    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    thread::spawn(move || read_commands(tx));
+    let emit = Emit::file(take_stdout()?);
+    let config_dir = trust::config_dir()?;
+    serve(
+        rx,
+        emit,
+        ServeOptions {
+            config_dir,
+            watch: true,
+        },
+    )
+    .await
 }
 
 struct ServeOptions {
@@ -1657,7 +1670,10 @@ async fn interrupted() {
     }
     #[cfg(not(unix))]
     {
-        std::future::pending::<()>().await
+        // Console Ctrl+C ends the process through the default handler.
+        // A desktop app stops this loop by closing stdin or sending `shutdown`.
+        // Installing a Ctrl+C handler here races with processes that have no console.
+        std::future::pending::<()>().await;
     }
 }
 
@@ -1795,8 +1811,25 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+fn detach_stdout() -> Result<File> {
+    #[cfg(unix)]
+    {
+        detach_stdout_unix()
+    }
+    #[cfg(windows)]
+    {
+        detach_stdout_windows()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(Error::protocol(
+            "the Whoosh app control channel is not available on this platform",
+        ))
+    }
+}
+
 #[cfg(unix)]
-fn silence_stdout() -> Result<File> {
+fn detach_stdout_unix() -> Result<File> {
     use std::os::unix::io::{AsRawFd, FromRawFd};
     let saved = unsafe { libc::dup(1) };
     if saved < 0 {
@@ -1808,6 +1841,84 @@ fn silence_stdout() -> Result<File> {
         return Err(Error::protocol("could not detach stdout"));
     }
     Ok(unsafe { File::from_raw_fd(saved) })
+}
+
+/// Duplicates the stdout handle the parent is reading, then points both the
+/// C runtime and the Win32 standard handle at `NUL`.
+#[cfg(windows)]
+fn detach_stdout_windows() -> Result<File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+    const DUPLICATE_SAME_ACCESS: u32 = 2;
+    const O_BINARY: i32 = 0x8000;
+
+    unsafe extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> *mut core::ffi::c_void;
+        fn SetStdHandle(n_std_handle: u32, handle: *mut core::ffi::c_void) -> i32;
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn DuplicateHandle(
+            source_process: *mut core::ffi::c_void,
+            source: *mut core::ffi::c_void,
+            target_process: *mut core::ffi::c_void,
+            target: *mut *mut core::ffi::c_void,
+            desired_access: u32,
+            inherit: i32,
+            options: u32,
+        ) -> i32;
+    }
+    unsafe extern "C" {
+        fn _dup2(src: i32, dst: i32) -> i32;
+        fn _open_osfhandle(osfhandle: isize, flags: i32) -> i32;
+        fn _close(fd: i32) -> i32;
+    }
+
+    let current = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    let invalid = -1isize as *mut core::ffi::c_void;
+    if current.is_null() || current == invalid {
+        return Err(Error::protocol("could not read stdout"));
+    }
+    let process = unsafe { GetCurrentProcess() };
+    let mut saved = core::ptr::null_mut();
+    let duplicated = unsafe {
+        DuplicateHandle(
+            process,
+            current,
+            process,
+            &mut saved,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if duplicated == 0 || saved.is_null() {
+        return Err(Error::protocol("could not duplicate stdout"));
+    }
+
+    let nul = std::fs::OpenOptions::new().write(true).open("NUL")?;
+    let nul_handle = nul.as_raw_handle() as isize;
+    // `_open_osfhandle` takes ownership of this handle.
+    std::mem::forget(nul);
+    let nul_fd = unsafe { _open_osfhandle(nul_handle, O_BINARY) };
+    if nul_fd < 0 {
+        return Err(Error::protocol("could not open NUL"));
+    }
+    let redirected = unsafe { _dup2(nul_fd, 1) };
+    unsafe { _close(nul_fd) };
+    if redirected != 0 {
+        return Err(Error::protocol("could not detach stdout"));
+    }
+
+    // Rust writes stdout with `WriteFile` on the Win32 standard handle, which
+    // `_dup2` does not change. Keep a second NUL handle alive for the process.
+    let win32_nul = std::fs::OpenOptions::new().write(true).open("NUL")?;
+    let win32_handle = win32_nul.as_raw_handle() as *mut core::ffi::c_void;
+    let updated = unsafe { SetStdHandle(STD_OUTPUT_HANDLE, win32_handle) };
+    std::mem::forget(win32_nul);
+    if updated == 0 {
+        return Err(Error::protocol("could not detach stdout"));
+    }
+    Ok(unsafe { File::from_raw_handle(saved) })
 }
 
 #[cfg(test)]

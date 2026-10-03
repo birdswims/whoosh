@@ -2,6 +2,11 @@ use tracing_subscriber::EnvFilter;
 
 fn main() {
     let app = std::env::args().nth(1).as_deref() == Some("app");
+    // Detach stdout before tracing or the standard streams are first used.
+    // The desktop apps read one JSON event per line from that handle.
+    if app {
+        whoosh::cli::prepare_app_stdio();
+    }
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // The app protocol owns stdout. Logs have to stay on stderr.
     if app {

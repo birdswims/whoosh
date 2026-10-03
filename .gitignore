@@ -4,3 +4,6 @@
 *.partial
 macos/Whoosh/.build
 dist
+windows/**/bin/
+windows/**/obj/
+windows/Setup/payload.zip

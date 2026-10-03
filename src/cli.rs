@@ -85,8 +85,15 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         seconds: u64,
     },
-    /// Speak the JSON control channel used by the macOS app.
+    /// Speak the JSON control channel used by the desktop apps.
     App,
+}
+
+/// Points later logs away from the handle the desktop app is reading.
+///
+/// Call this before anything writes to stdout. `whoosh app` does it from `main`.
+pub fn prepare_app_stdio() {
+    crate::appctl::prepare_app_stdio();
 }
 
 /// Runs the command on a worker thread.

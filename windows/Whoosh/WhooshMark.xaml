@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Whoosh.WhooshMark"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    AutomationProperties.Name="Whoosh">
+    <Viewbox>
+        <Canvas Width="100" Height="100">
+            <Path
+                Stroke="{ThemeResource TextFillColorPrimaryBrush}"
+                StrokeThickness="7.2"
+                StrokeStartLineCap="Round"
+                StrokeEndLineCap="Round"
+                Opacity="0.28"
+                Data="M 14.05,48.46 A 40,40 0 0 1 87.09,51.02" />
+            <Path
+                Stroke="{ThemeResource TextFillColorPrimaryBrush}"
+                StrokeThickness="7.8"
+                StrokeStartLineCap="Round"
+                StrokeEndLineCap="Round"
+                Opacity="0.58"
+                Data="M 24.38,53.51 A 28.5,28.5 0 0 1 76.43,55.32" />
+            <Path
+                Stroke="{ThemeResource TextFillColorPrimaryBrush}"
+                StrokeThickness="8.6"
+                StrokeStartLineCap="Round"
+                StrokeEndLineCap="Round"
+                Data="M 35.17,58.77 A 16.5,16.5 0 0 1 65.30,59.82" />
+        </Canvas>
+    </Viewbox>
+</UserControl>

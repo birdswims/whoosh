@@ -1,7 +1,7 @@
 //! Remembered Whoosh peers.
 //!
 //! The file is one `address fingerprint` pair per line in
-//! `~/.config/whoosh/known-peers`. The command-line sender and the macOS app
+//! `~/.config/whoosh/known-peers`. The command-line sender and the desktop apps
 //! share it.
 
 use std::net::SocketAddr;

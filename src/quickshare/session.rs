@@ -249,8 +249,19 @@ async fn send_prepared(
             }
         }
     }
+    // Windows resets a socket that is closed with unread bytes, and that reset
+    // discards file bytes the receiver has not read yet. Shut the write side
+    // down, then drain whatever the receiver still sends.
     drop(outgoing);
     let _ = writer_task.await;
+    let _ = timeout(Duration::from_millis(500), async {
+        loop {
+            if read_body(&mut reader).await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
     let bytes = outgoing_files.iter().map(|file| file.total).sum();
     Ok(TransferDone {
         accepted: true,
@@ -299,7 +310,14 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
         tokio::select! {
             biased;
             body = read_body(&mut reader) => {
-                let plain = secure.decrypt(&body?)?;
+                let body = match body {
+                    Ok(body) => body,
+                    // The sender can close as soon as the last byte is out.
+                    // The files are already on disk, so that close is success.
+                    Err(_) if !files.is_empty() && files.values().all(|file| file.done) => break,
+                    Err(error) => return Err(error),
+                };
+                let plain = secure.decrypt(&body)?;
                 let frame = decode_frame::<conn::OfflineFrame>(&plain)?;
                 let frame_type = frame.v1.as_ref().and_then(|v1| v1.frame_type);
                 if frame_type == Some(conn::DISCONNECTION) {
@@ -1009,6 +1027,7 @@ fn spawn_writer(
                 break;
             }
         }
+        let _ = writer.shutdown().await;
     });
     (tx, task)
 }

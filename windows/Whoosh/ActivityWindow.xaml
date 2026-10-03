@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Whoosh.ActivityWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Whoosh"
+    Title="Activity">
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+    <Grid x:Name="Root" Padding="24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid>
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <local:WhooshMark Width="28" Height="28" />
+                <TextBlock VerticalAlignment="Center" FontSize="20" FontWeight="SemiBold" Text="Activity" />
+            </StackPanel>
+            <Button
+                HorizontalAlignment="Right"
+                VerticalAlignment="Center"
+                Click="Clear_Click"
+                Content="Clear History"
+                IsEnabled="{Binding CanClearActivity}" />
+        </Grid>
+        <TextBlock
+            Grid.Row="1"
+            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+            Text="Transfers show up here."
+            Visibility="{Binding HasActivity, Converter={StaticResource VisNot}}" />
+        <ListView Grid.Row="1" ItemsSource="{Binding Activity}" SelectionMode="None" Visibility="{Binding HasActivity, Converter={StaticResource Vis}}">
+            <ListView.ItemContainerStyle>
+                <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    <Setter Property="Padding" Value="0,6" />
+                </Style>
+            </ListView.ItemContainerStyle>
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="20" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ProgressRing Width="16" Height="16" IsActive="True" Visibility="{Binding IsWorking, Converter={StaticResource Vis}}" />
+                        <FontIcon FontSize="12" Foreground="{ThemeResource WhooshSignalBrush}" Glyph="&#xE73E;" Visibility="{Binding IsDone, Converter={StaticResource Vis}}" />
+                        <FontIcon FontSize="12" Foreground="#FFB3473C" Glyph="&#xE711;" Visibility="{Binding IsFailed, Converter={StaticResource Vis}}" />
+                        <FontIcon FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE738;" Visibility="{Binding IsOther, Converter={StaticResource Vis}}" />
+                        <StackPanel Grid.Column="1">
+                            <TextBlock FontWeight="Medium" Text="{Binding Title}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding Subtitle}" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <Button
+                            Grid.Column="2"
+                            VerticalAlignment="Center"
+                            Click="Show_Click"
+                            Content="Show"
+                            Style="{StaticResource SubtleButtonStyle}"
+                            Tag="{Binding}"
+                            Visibility="{Binding CanShow, Converter={StaticResource Vis}}" />
+                    </Grid>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+    </Grid>
+</Window>

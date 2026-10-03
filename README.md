@@ -37,6 +37,20 @@ legacy HTTPS implementation and is not verified with iPadOS 27.
 
 `whoosh app` is the control channel the app uses. The commands above still work from a terminal.
 
+## Windows app
+
+The Windows 11 app uses the same engine. It sends and receives with other Whoosh computers and with Android Quick Share on the local network. AirDrop discovery uses Apple's AWDL interface, which Windows does not have, so iPhones do not appear in the list. The AirDrop listener still accepts an upload that reaches this PC.
+
+```powershell
+scripts/windows-setup.ps1
+```
+
+The script writes `dist/WhooshSetup.exe`. Run that installer. It installs Whoosh for the current user, adds a Start menu shortcut, and can open the app. It does not need an administrator. Received files go to `%USERPROFILE%\Whoosh`. The certificate shown in Settings stays the same across launches; compare it before trusting another computer.
+
+Windows may ask the first time whether the transfer engine may listen on private networks. Allow it on private networks so other computers and phones can connect.
+
+`whoosh app` is the control channel this app uses too.
+
 ## Receive
 
 ```bash
