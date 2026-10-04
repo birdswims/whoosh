@@ -433,9 +433,12 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
                                     watch.message = error.to_string();
                                     return Err(error);
                                 }
+                                file.size = Some(bytes.len() as u64);
                                 file.done = true;
+                                let dest = file.dest.clone();
+                                meter.set_total(receive_total(&files));
                                 meter.add(bytes.len() as u64);
-                                done.files.push(file.dest.clone());
+                                done.files.push(dest);
                                 done.bytes += bytes.len() as u64;
                                 if files.values().all(|item| item.done) {
                                     break;
@@ -457,7 +460,7 @@ async fn handle_server(socket: TcpStream, config: QuickshareConfig) -> Result<Tr
                 accepted = true;
                 watch.accepted = true;
                 done.accepted = true;
-                let total = files.values().map(|file| file.size).sum();
+                let total = receive_total(&files);
                 if total > 0 {
                     meter.set_total(total);
                 }
@@ -536,7 +539,9 @@ fn on_share_frame(
             for file in intro.file_metadata {
                 let name = file.name.unwrap_or_default();
                 safe_file_name(&name)?;
-                let size = u64::try_from(file.size.unwrap_or(0)).unwrap_or(u64::MAX);
+                tracing::debug!(payload_id = ?file.payload_id, declared_size = ?file.size, "quick share incoming file metadata");
+                let declared_size = file.size.and_then(|size| u64::try_from(size).ok());
+                let size = declared_size.unwrap_or(0);
                 if size > config.max_file_bytes {
                     send_bytes_payload(outgoing, secure, &share_response(share::NOT_ENOUGH_SPACE))?;
                     return Err(Error::protocol(format!(
@@ -552,7 +557,7 @@ fn on_share_frame(
                     id,
                     InFile {
                         name: name.clone(),
-                        size,
+                        size: declared_size,
                         mime: mime.clone(),
                         kind: kind_of_mime(&mime),
                         kind_name: "file".into(),
@@ -565,13 +570,15 @@ fn on_share_frame(
                 offer_files.push(IncomingFile {
                     name,
                     bytes: size,
+                    size_known: declared_size.is_some(),
                     mime,
                     kind: MediaKind::Other,
                 });
             }
             for text in intro.text_metadata {
                 let id = text.payload_id.unwrap_or(0);
-                let size = u64::try_from(text.size.unwrap_or(0)).unwrap_or(0);
+                let declared_size = text.size.and_then(|size| u64::try_from(size).ok());
+                let size = declared_size.unwrap_or(0);
                 let name = text
                     .text_title
                     .filter(|title| safe_file_name(title).is_ok())
@@ -587,7 +594,7 @@ fn on_share_frame(
                     id,
                     InFile {
                         name: name.clone(),
-                        size,
+                        size: declared_size,
                         mime: "text/plain".into(),
                         kind: MediaKind::Other,
                         kind_name: "text".into(),
@@ -600,6 +607,7 @@ fn on_share_frame(
                 offer_files.push(IncomingFile {
                     name,
                     bytes: size,
+                    size_known: declared_size.is_some(),
                     mime: "text/plain".into(),
                     kind: MediaKind::Other,
                 });
@@ -650,6 +658,20 @@ async fn absorb_file(
     let file = files
         .get_mut(&id)
         .ok_or_else(|| Error::protocol("unknown quick share file"))?;
+    if file.written == 0 {
+        tracing::debug!(payload_id = id, declared_size = ?file.size, header_size = ?header.total_size, "quick share first file payload");
+    }
+    if let Some(size) = header.total_size.and_then(|size| u64::try_from(size).ok()) {
+        if size > config.max_file_bytes {
+            return Err(Error::TooLarge);
+        }
+        if file.size.is_some_and(|declared| declared != size) {
+            return Err(Error::protocol("quick share file size changed"));
+        }
+        file.size = Some(size);
+    }
+    meter.set_total(receive_total(files));
+    let file = files.get_mut(&id).unwrap();
     let chunk = transfer.payload_chunk.unwrap_or(conn::PayloadChunk {
         flags: None,
         offset: Some(0),
@@ -660,7 +682,14 @@ async fn absorb_file(
     if offset != file.written {
         return Err(Error::protocol("quick share file chunk is out of order"));
     }
-    if file.written + body.len() as u64 > file.size.max(file.written) && file.size > 0 {
+    let next_written = file
+        .written
+        .checked_add(body.len() as u64)
+        .ok_or(Error::TooLarge)?;
+    if next_written > config.max_file_bytes {
+        return Err(Error::TooLarge);
+    }
+    if file.size.is_some_and(|size| next_written > size) {
         return Err(Error::protocol(
             "quick share file exceeded its declared size",
         ));
@@ -679,26 +708,38 @@ async fn absorb_file(
     }
     let last = chunk.flags.unwrap_or(0) & conn::LAST_CHUNK != 0;
     if last {
-        if file.size != file.written {
+        if file.size.is_some_and(|size| size != file.written) {
             return Err(Error::protocol(format!(
                 "{} is incomplete ({} of {} bytes)",
-                file.name, file.written, file.size
+                file.name,
+                file.written,
+                file.size.unwrap()
             )));
         }
         let dest = file.dest.clone();
         if let Some(partial) = file.partial.as_mut() {
             partial.commit(&dest).await?;
         }
+        file.size = Some(file.written);
         file.done = true;
         done.files.push(dest);
         done.bytes += file.written;
         send_secure(
             outgoing,
             secure,
-            &conn::payload_ack(id, conn::FILE, file.size as i64),
+            &conn::payload_ack(id, conn::FILE, file.written as i64),
         )?;
     }
+    meter.set_total(receive_total(files));
     Ok(())
+}
+
+// A partial sum would show a misleading percentage for a mixed batch.
+fn receive_total(files: &HashMap<i64, InFile>) -> u64 {
+    files
+        .values()
+        .try_fold(0u64, |total, file| total.checked_add(file.size?))
+        .unwrap_or(0)
 }
 
 async fn write_bytes_file(
@@ -718,7 +759,7 @@ async fn write_bytes_file(
 
 struct InFile {
     name: String,
-    size: u64,
+    size: Option<u64>,
     #[allow(dead_code)]
     mime: String,
     kind: MediaKind,
@@ -1396,6 +1437,110 @@ mod tests {
             std::fs::read(dir.path().join("note.txt")).unwrap(),
             b"hello"
         );
+    }
+
+    #[tokio::test]
+    async fn receives_files_with_missing_sizes_and_validates_headers() {
+        use super::*;
+        use std::sync::Mutex;
+
+        // Metadata missing, all sizes missing, empty file, mismatch, and limits.
+        for (declared, header_size, body, limit, succeeds) in [
+            (None, Some(5), b"hello".as_slice(), 100, true),
+            (None, None, b"hello".as_slice(), 100, true),
+            (None, Some(-1), b"hello".as_slice(), 100, true),
+            (Some(0), Some(0), b"".as_slice(), 100, true),
+            (Some(4), Some(5), b"hello".as_slice(), 100, false),
+            (None, Some(5), b"hello".as_slice(), 4, false),
+            (None, None, b"hello".as_slice(), 4, false),
+            (Some(6), Some(6), b"hello".as_slice(), 100, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = QuickshareConfig::auto(dir.path());
+            config.max_file_bytes = limit;
+            let mut files = HashMap::from([(
+                1,
+                InFile {
+                    name: "test.bin".into(),
+                    size: declared,
+                    mime: "application/octet-stream".into(),
+                    kind: MediaKind::Other,
+                    kind_name: "file".into(),
+                    written: 0,
+                    partial: None,
+                    dest: PathBuf::new(),
+                    done: false,
+                },
+            )]);
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let log = seen.clone();
+            let meter = ByteMeter::new(
+                receive_total(&files),
+                Arc::new(move |p| log.lock().unwrap().push(p)),
+            );
+            let (outgoing, _rx) = mpsc::unbounded_channel();
+            let mut secure = SecureChannel::from_next_secret(&[7; 32], false).unwrap();
+            let mut done = TransferDone::default();
+            let transfer = conn::PayloadTransferFrame {
+                payload_header: Some(conn::PayloadHeader {
+                    id: Some(1),
+                    payload_type: Some(conn::FILE),
+                    total_size: header_size,
+                    ..Default::default()
+                }),
+                payload_chunk: Some(conn::PayloadChunk {
+                    flags: Some(conn::LAST_CHUNK),
+                    offset: Some(0),
+                    body: Some(body.to_vec()),
+                }),
+                ..Default::default()
+            };
+            let result = absorb_file(
+                &config,
+                &outgoing,
+                &mut secure,
+                &mut files,
+                &mut done,
+                &meter,
+                transfer,
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                succeeds,
+                "{declared:?} {header_size:?}: {result:?}"
+            );
+            if succeeds {
+                assert_eq!(std::fs::read(dir.path().join("test.bin")).unwrap(), body);
+                assert_eq!(done.bytes, body.len() as u64);
+                meter.finish();
+                assert_eq!(
+                    seen.lock().unwrap().last().unwrap().total,
+                    body.len() as u64
+                );
+                if header_size == Some(5) {
+                    assert_eq!(seen.lock().unwrap().first().unwrap().total, 5);
+                }
+                // An unknown second attachment must suppress a partial batch total.
+                files.insert(
+                    2,
+                    InFile {
+                        name: "next.bin".into(),
+                        size: None,
+                        mime: String::new(),
+                        kind: MediaKind::Other,
+                        kind_name: "file".into(),
+                        written: 0,
+                        partial: None,
+                        dest: PathBuf::new(),
+                        done: false,
+                    },
+                );
+                assert_eq!(receive_total(&files), 0);
+            } else {
+                assert!(!dir.path().join("test.bin").exists());
+            }
+        }
     }
 
     #[tokio::test]

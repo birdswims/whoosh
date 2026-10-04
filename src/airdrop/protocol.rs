@@ -14,6 +14,7 @@ use crate::mime::{self, sniff};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskFile {
     pub name: String,
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,8 +74,10 @@ pub fn parse_ask(body: &[u8]) -> Result<Ask> {
                 .get("FileName")
                 .and_then(Value::as_string)
                 .ok_or_else(|| Error::protocol("ask file is missing FileName"))?;
+            tracing::debug!(fields = ?file.keys().collect::<Vec<_>>(), size = ?file.get("FileSize").and_then(plist::Value::as_unsigned_integer), "AirDrop incoming file metadata");
             files.push(AskFile {
                 name: name.to_string(),
+                size: file.get("FileSize").and_then(Value::as_unsigned_integer),
             });
         }
     }
@@ -215,6 +218,7 @@ mod tests {
         let parsed = parse_ask(&ask).unwrap();
         assert_eq!(parsed.sender_name, "iPhone");
         assert_eq!(parsed.files[0].name, "photo.jpg");
+        assert_eq!(parsed.files[0].size, Some(4));
         let dict = plist::Value::from_reader(std::io::Cursor::new(&ask))
             .unwrap()
             .into_dictionary()

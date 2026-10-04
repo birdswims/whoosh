@@ -336,6 +336,7 @@ async fn handle_receive(
         incoming.push(IncomingFile {
             name: file.name.clone(),
             bytes: file.size,
+            size_known: true,
             mime: file.mime.clone(),
             kind: kind_of_mime(&file.mime),
         });

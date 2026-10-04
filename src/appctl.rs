@@ -888,6 +888,7 @@ fn gui_approval(
                     json!({
                         "name": file.name,
                         "bytes": file.bytes,
+                        "size_known": file.size_known,
                         "mime": file.mime,
                         "kind": kind_name(file.kind),
                     })

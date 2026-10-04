@@ -71,7 +71,7 @@ struct OfferOverlay: View {
                     Text(file.name)
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    Text(file.bytes == 0 ? "Size unknown" : humanSize(file.bytes))
+                    Text(file.isSizeKnown ? humanSize(file.bytes) : "Size unknown")
                         .foregroundStyle(.secondary)
                         .font(.system(size: 12))
                 }

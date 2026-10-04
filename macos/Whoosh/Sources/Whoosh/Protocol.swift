@@ -36,6 +36,8 @@ struct Peer: Identifiable, Decodable, Hashable {
 }
 
 struct OfferFile: Decodable, Hashable {
+    var sizeKnown: Bool? = nil
+    var isSizeKnown: Bool { sizeKnown ?? (bytes > 0) }
     var name: String
     var bytes: UInt64
     var mime: String
@@ -89,7 +91,7 @@ struct Offer: Identifiable, Equatable {
     }
 
     var sizeUnknown: Bool {
-        !files.isEmpty && files.allSatisfy { $0.bytes == 0 }
+        files.contains { !$0.isSizeKnown }
     }
 }
 

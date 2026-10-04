@@ -9,6 +9,7 @@ use crate::mime::MediaKind;
 pub struct IncomingFile {
     pub name: String,
     pub bytes: u64,
+    pub size_known: bool,
     pub mime: String,
     pub kind: MediaKind,
 }
@@ -24,6 +25,9 @@ pub struct TransferOffer {
 
 impl TransferOffer {
     pub fn total_bytes(&self) -> u64 {
+        if self.files.iter().any(|file| !file.size_known) {
+            return 0;
+        }
         self.files.iter().map(|file| file.bytes).sum()
     }
 }

@@ -95,9 +95,10 @@ and printed in the terminal. The test fixture comes from bsdtar, independently
 of Whoosh's own archive writer; an HTTPS test exercises chunked Ask and Upload
 requests with `Expect: 100-continue`.
 
-The approval prompt says `size unknown` for AirDrop offers whose size Whoosh
-does not know. Previously it displayed a hardcoded `0 B`; that did not indicate
-an empty photo. Successful uploads print the saved file count and byte count.
+AirDrop offers preserve the optional `FileSize` field from each Ask file entry,
+including Samsung Quick Share transfers using AirDrop compatibility. A known
+zero-byte file is displayed as empty; missing or invalid sizes remain unknown.
+Successful uploads print the saved file count and byte count.
 
 Quick Share UKEY2 derives its authentication and next-protocol secrets from
 `SHA256(ECDH shared x)`, followed by HKDF-SHA256 with the UKEY2 salts and the

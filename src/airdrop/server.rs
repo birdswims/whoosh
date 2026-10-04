@@ -244,6 +244,7 @@ impl AirdropReceiver {
         if head.path != "/Upload" {
             return None;
         }
+        tracing::debug!(headers = ?head.headers.keys().collect::<Vec<_>>(), content_length = ?head.headers.get("content-length"), transfer_encoding = ?head.headers.get("transfer-encoding"), content_type = ?head.headers.get("content-type"), "AirDrop upload framing");
         let pending = self.pending.lock().await;
         if !pending.accepted {
             return None;
@@ -441,7 +442,8 @@ fn offer_from_ask(ask: &Ask) -> TransferOffer {
                 let (kind, mime) = sniff(&[], &file.name);
                 IncomingFile {
                     name: file.name.clone(),
-                    bytes: 0,
+                    bytes: file.size.unwrap_or(0),
+                    size_known: file.size.is_some(),
                     mime: mime.to_string(),
                     kind,
                 }
@@ -819,6 +821,35 @@ fn _kind(mime: &str) -> MediaKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incoming_offer_preserves_optional_file_sizes() {
+        use crate::airdrop::protocol;
+        let body = protocol::ask_request(
+            "Samsung", "Galaxy", "sender",
+            &[("photo.jpg".into(), "image/jpeg".into(), 12345)],
+        ).unwrap();
+        for (size, expected) in [
+            (Some(plist::Value::Integer(12345.into())), Some(12345)),
+            (Some(plist::Value::Integer(0.into())), Some(0)),
+            (None, None),
+            (Some(plist::Value::Integer((-1).into())), None),
+        ] {
+            let mut value = plist::Value::from_reader(std::io::Cursor::new(&body)).unwrap();
+            let file = value.as_dictionary_mut().unwrap().get_mut("Files").unwrap()
+                .as_array_mut().unwrap()[0].as_dictionary_mut().unwrap();
+            file.remove("FileSize");
+            if let Some(size) = size { file.insert("FileSize".into(), size); }
+            let mut bytes = Vec::new();
+            value.to_writer_binary(&mut bytes).unwrap();
+            let ask = protocol::parse_ask(&bytes).unwrap();
+            let offer = super::offer_from_ask(&ask);
+            assert_eq!(ask.files[0].size, expected);
+            assert_eq!(offer.files[0].bytes, expected.unwrap_or(0));
+            assert_eq!(offer.files[0].size_known, expected.is_some());
+            assert_eq!(offer.total_bytes(), expected.unwrap_or(0));
+        }
+    }
+
     use super::{send_plain, AirdropConfig, AirdropReceiver};
     use crate::approve::approval;
     use std::net::SocketAddr;
