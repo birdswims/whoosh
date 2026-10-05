@@ -79,17 +79,51 @@ final class Engine {
         }
     }
 
-    /// Asks the engine to drop its advertisements, then signals it if it is still up.
+    /// Asks the engine to exit, then kills it and every process it started.
+    ///
+    /// SIGTERM does not stop the engine: its runtime installs a handler and
+    /// keeps the signal. `dns-sd` also calls `setsid`, so it outlives the
+    /// engine unless this walks the child list and kills those pids too.
     func stopAndWait() {
         intentionalStop = true
         send(Command(id: "bye", op: "shutdown"))
         try? input?.close()
         input = nil
-        let running = process
-        Thread.sleep(forTimeInterval: 0.4)
-        if running?.isRunning == true {
-            running?.terminate()
-            Thread.sleep(forTimeInterval: 0.25)
+        guard let running = process else { return }
+        if waitUntilStopped(running, timeout: 2.5) {
+            running.waitUntilExit()
+            return
+        }
+        forceStop(running)
+        _ = waitUntilStopped(running, timeout: 1)
+        if !running.isRunning {
+            running.waitUntilExit()
+        }
+    }
+
+    private func waitUntilStopped(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !process.isRunning
+    }
+
+    private func forceStop(_ process: Process) {
+        let pid = process.processIdentifier
+        guard pid > 1 else { return }
+        for _ in 0..<8 {
+            let children = descendantPids(of: pid)
+            if children.isEmpty {
+                break
+            }
+            for child in children {
+                kill(child, SIGKILL)
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if process.isRunning {
+            kill(pid, SIGKILL)
         }
     }
 
@@ -190,4 +224,37 @@ final class Engine {
         }
         return nil
     }
+}
+
+@_silgen_name("proc_listchildpids")
+private func proc_listchildpids(
+    _ ppid: Int32,
+    _ buffer: UnsafeMutableRawPointer?,
+    _ bufsize: Int32
+) -> Int32
+
+/// `proc_listchildpids` writes pids at the front of the buffer. Its return is
+/// either that count or a byte count; extra slots stay zero and are dropped.
+private func childPids(_ pid: pid_t) -> [pid_t] {
+    var buffer = [pid_t](repeating: 0, count: 256)
+    let wrote = buffer.withUnsafeMutableBytes { raw in
+        proc_listchildpids(pid, raw.baseAddress, Int32(raw.count))
+    }
+    guard wrote > 0 else { return [] }
+    let count = min(buffer.count, Int(wrote))
+    return Array(buffer.prefix(count)).filter { $0 > 1 }
+}
+
+private func descendantPids(of root: pid_t) -> [pid_t] {
+    var ordered: [pid_t] = []
+    var seen: Set<pid_t> = [root]
+    func walk(_ pid: pid_t, _ depth: Int) {
+        if depth > 8 { return }
+        for child in childPids(pid) where seen.insert(child).inserted {
+            walk(child, depth + 1)
+            ordered.append(child)
+        }
+    }
+    walk(root, 0)
+    return ordered
 }

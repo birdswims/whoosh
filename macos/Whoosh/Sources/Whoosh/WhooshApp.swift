@@ -79,6 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateNow
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        AppModel.shared?.shutdown()
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         DispatchQueue.main.async {
             AppModel.shared?.addURLs(urls)

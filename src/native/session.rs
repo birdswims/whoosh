@@ -549,11 +549,7 @@ async fn request_clipboard(connection: quinn::Connection, name: &str) -> Result<
     }
     let mut request_id = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut request_id);
-    write_control(
-        &mut send,
-        &Control::ClipboardPull { request_id },
-    )
-    .await?;
+    write_control(&mut send, &Control::ClipboardPull { request_id }).await?;
     let item = match read_control(&mut recv).await? {
         Control::Clipboard(clipboard) if clipboard.request_id == request_id => ClipboardItem {
             text: clipboard.text,
@@ -575,7 +571,8 @@ async fn serve_clipboard(
 ) -> Result<()> {
     // Anonymous LAN peers can open a QUIC connection. The clipboard leaves only
     // when the client certificate is one this computer has already trusted.
-    let allowed = client_fingerprint(connection).is_some_and(|fingerprint| (options.allow_device)(&fingerprint));
+    let allowed = client_fingerprint(connection)
+        .is_some_and(|fingerprint| (options.allow_device)(&fingerprint));
     if !allowed {
         write_control(
             send,

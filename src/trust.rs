@@ -345,7 +345,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use super::{
-        announcement_trusts_us, announced_trust_at, fingerprint_hex, fingerprint_is_trusted_at,
+        announced_trust_at, announcement_trusts_us, fingerprint_hex, fingerprint_is_trusted_at,
         forget_fingerprint_at, list_trusted_at, parse_fingerprint, remember_at, remembered_at,
         trust_fingerprint_at,
     };
@@ -430,7 +430,8 @@ mod tests {
 
     #[test]
     fn reads_a_grouped_fingerprint() {
-        let grouped = "ab12 cd34 ef56 ab12 cd34 ef56 ab12 cd34\nef56 ab12 cd34 ef56 ab12 cd34 ef56 ab12";
+        let grouped =
+            "ab12 cd34 ef56 ab12 cd34 ef56 ab12 cd34\nef56 ab12 cd34 ef56 ab12 cd34 ef56 ab12";
         let parsed = parse_fingerprint(grouped).unwrap();
         assert_eq!(parsed[0], 0xab);
         assert_eq!(parsed[1], 0x12);
@@ -453,18 +454,28 @@ mod tests {
         assert_eq!(pairs[0].0, "tf0");
         assert_eq!(pairs[1].0, "tf1");
         assert!(pairs[0].1 < pairs[1].1);
-        assert!(!pairs.iter().any(|(_, value)| value == &fingerprint_hex(&own)));
+        assert!(!pairs
+            .iter()
+            .any(|(_, value)| value == &fingerprint_hex(&own)));
         let own_text = fingerprint_hex(&own);
         assert!(!announcement_trusts_us(
-            pairs.iter().map(|(key, value)| (key.as_str(), value.as_str())),
+            pairs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
             &own_text,
         ));
         assert!(announcement_trusts_us(
             [("tf0", pairs[0].1.as_str())],
             &pairs[0].1,
         ));
-        assert!(!announcement_trusts_us([("n", pairs[0].1.as_str())], &pairs[0].1));
-        assert!(!announcement_trusts_us([("tf", pairs[0].1.as_str())], &pairs[0].1));
+        assert!(!announcement_trusts_us(
+            [("n", pairs[0].1.as_str())],
+            &pairs[0].1
+        ));
+        assert!(!announcement_trusts_us(
+            [("tf", pairs[0].1.as_str())],
+            &pairs[0].1
+        ));
     }
 
     #[test]

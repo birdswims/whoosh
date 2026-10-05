@@ -825,9 +825,12 @@ mod tests {
     fn incoming_offer_preserves_optional_file_sizes() {
         use crate::airdrop::protocol;
         let body = protocol::ask_request(
-            "Samsung", "Galaxy", "sender",
+            "Samsung",
+            "Galaxy",
+            "sender",
             &[("photo.jpg".into(), "image/jpeg".into(), 12345)],
-        ).unwrap();
+        )
+        .unwrap();
         for (size, expected) in [
             (Some(plist::Value::Integer(12345.into())), Some(12345)),
             (Some(plist::Value::Integer(0.into())), Some(0)),
@@ -835,10 +838,19 @@ mod tests {
             (Some(plist::Value::Integer((-1).into())), None),
         ] {
             let mut value = plist::Value::from_reader(std::io::Cursor::new(&body)).unwrap();
-            let file = value.as_dictionary_mut().unwrap().get_mut("Files").unwrap()
-                .as_array_mut().unwrap()[0].as_dictionary_mut().unwrap();
+            let file = value
+                .as_dictionary_mut()
+                .unwrap()
+                .get_mut("Files")
+                .unwrap()
+                .as_array_mut()
+                .unwrap()[0]
+                .as_dictionary_mut()
+                .unwrap();
             file.remove("FileSize");
-            if let Some(size) = size { file.insert("FileSize".into(), size); }
+            if let Some(size) = size {
+                file.insert("FileSize".into(), size);
+            }
             let mut bytes = Vec::new();
             value.to_writer_binary(&mut bytes).unwrap();
             let ask = protocol::parse_ask(&bytes).unwrap();

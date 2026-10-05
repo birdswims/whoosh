@@ -65,24 +65,31 @@ fn take_stdout() -> Result<File> {
 }
 
 pub async fn run() -> Result<()> {
+    crate::children::allow_quit_deadline();
     let (tx, rx) = mpsc::unbounded_channel();
     thread::spawn(move || read_commands(tx));
     let emit = Emit::file(take_stdout()?);
     let config_dir = trust::config_dir()?;
-    serve(
+    let result = serve(
         rx,
         emit,
         ServeOptions {
             config_dir,
             watch: true,
+            reap_children: true,
         },
     )
-    .await
+    .await;
+    crate::children::disarm_quit_deadline();
+    result
 }
 
 struct ServeOptions {
     config_dir: PathBuf,
     watch: bool,
+    /// Stop helper processes on shutdown. Tests leave this off so one test
+    /// cannot kill another test's `dns-sd`.
+    reap_children: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,9 +353,22 @@ async fn serve(
 
     if let Some((cancel, task)) = watch {
         cancel.cancel();
+        if options.reap_children {
+            crate::children::arm_quit_deadline();
+            crate::children::kill_all();
+        }
         task.abort();
+        // Resolvers are blocking on `dns-sd`. Killing those processes lets
+        // this join finish instead of waiting out their lookup timeout.
+        let _ = tokio::time::timeout(Duration::from_millis(400), task).await;
+    } else if options.reap_children {
+        crate::children::arm_quit_deadline();
+        crate::children::kill_all();
     }
     host.stop_runtime();
+    if options.reap_children {
+        crate::children::kill_all();
+    }
     Ok(())
 }
 
@@ -1045,8 +1065,8 @@ fn prepare_clipboard_pull(host: &Host, command: &Command) -> Result<ClipboardJob
         .as_deref()
         .filter(|text| !text.is_empty())
         .ok_or_else(|| Error::protocol("that device did not share a fingerprint"))?;
-    let fingerprint = trust::parse_fingerprint(text)
-        .ok_or_else(|| Error::protocol("fingerprint is invalid"))?;
+    let fingerprint =
+        trust::parse_fingerprint(text).ok_or_else(|| Error::protocol("fingerprint is invalid"))?;
     let already = trust::fingerprint_is_trusted(&fingerprint) || trust::remembered(&addr).is_some();
     let peer_name = command
         .peer_name
@@ -1386,12 +1406,15 @@ async fn discover_loop(cancel: CancellationToken, filter: Arc<Mutex<Filter>>, em
         if cancel.is_cancelled() {
             break;
         }
-        let mut browser = match PeerBrowser::open(&[
-            (native::SERVICE_TYPE, "whoosh"),
-            (QUICKSHARE, "quickshare"),
-            (AIRDROP, "airdrop"),
-            (crate::airdrop::ALT_SERVICE_TYPE, "airdrop"),
-        ]) {
+        let mut browser = match PeerBrowser::open(
+            &[
+                (native::SERVICE_TYPE, "whoosh"),
+                (QUICKSHARE, "quickshare"),
+                (AIRDROP, "airdrop"),
+                (crate::airdrop::ALT_SERVICE_TYPE, "airdrop"),
+            ],
+            cancel.clone(),
+        ) {
             Ok(browser) => browser,
             Err(error) => {
                 tracing::warn!(%error, "nearby discovery did not start");
@@ -1705,7 +1728,9 @@ fn list_native(peer: FoundPeer, own_fingerprint: Option<&str>) -> Listed {
         || trust::remembered(&peer.addr).is_some();
     let trusts_us = own_fingerprint.is_some_and(|own| {
         trust::announcement_trusts_us(
-            peer.txt.iter().map(|(key, value)| (key.as_str(), value.as_str())),
+            peer.txt
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
             own,
         )
     });
@@ -1839,8 +1864,7 @@ impl Filter {
         match peer.via {
             "whoosh" => peer.fingerprint.is_some() && self.fingerprint == peer.fingerprint,
             "airdrop" => {
-                !peer.instance.is_empty()
-                    && self.airdrop_instance.as_ref() == Some(&peer.instance)
+                !peer.instance.is_empty() && self.airdrop_instance.as_ref() == Some(&peer.instance)
             }
             _ => false,
         }
@@ -2225,7 +2249,10 @@ fn is_local(addr: IpAddr) -> bool {
 
 fn canonical_ip(addr: IpAddr) -> IpAddr {
     match addr {
-        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
         other => other,
     }
 }
@@ -2477,30 +2504,10 @@ mod tests {
             None,
             "Hariom's Windows",
         )));
-        assert!(!filter.hides(&sample(
-            "quickshare",
-            "203.0.113.8:49187",
-            None,
-            "phone",
-        )));
-        assert!(filter.hides(&sample(
-            "airdrop",
-            "127.0.0.1:8771",
-            None,
-            "someone",
-        )));
-        assert!(filter.hides(&sample(
-            "airdrop",
-            "203.0.113.7:9",
-            None,
-            "aabbccddeeff",
-        )));
-        assert!(!filter.hides(&sample(
-            "airdrop",
-            "203.0.113.7:8770",
-            None,
-            "someone",
-        )));
+        assert!(!filter.hides(&sample("quickshare", "203.0.113.8:49187", None, "phone",)));
+        assert!(filter.hides(&sample("airdrop", "127.0.0.1:8771", None, "someone",)));
+        assert!(filter.hides(&sample("airdrop", "203.0.113.7:9", None, "aabbccddeeff",)));
+        assert!(!filter.hides(&sample("airdrop", "203.0.113.7:8770", None, "someone",)));
         let Some(interfaces) = if_addrs::get_if_addrs().ok() else {
             return;
         };
@@ -2763,6 +2770,7 @@ mod tests {
             ServeOptions {
                 config_dir: config_dir.path().to_path_buf(),
                 watch: false,
+                reap_children: false,
             },
         ));
         tx.send(Incoming::Command(

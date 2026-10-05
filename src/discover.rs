@@ -51,7 +51,7 @@ enum Backend {
     },
     #[cfg(target_os = "macos")]
     System {
-        child: Option<std::process::Child>,
+        child: Option<crate::children::TrackedChild>,
         instance: String,
         port: u16,
     },
@@ -123,14 +123,14 @@ impl Advertisement {
                     let _ = old.kill();
                     let _ = old.wait();
                 }
-                let mut replacement = match system_advertisement(&service_type, &instance, port, txt)
-                {
-                    Ok(advert) => advert,
-                    Err(SystemStart::Missing) => {
-                        return Err(Error::protocol("dns-sd is not installed"));
-                    }
-                    Err(SystemStart::Failed(error)) => return Err(error),
-                };
+                let mut replacement =
+                    match system_advertisement(&service_type, &instance, port, txt) {
+                        Ok(advert) => advert,
+                        Err(SystemStart::Missing) => {
+                            return Err(Error::protocol("dns-sd is not installed"));
+                        }
+                        Err(SystemStart::Failed(error)) => return Err(error),
+                    };
                 let new_backend = std::mem::replace(&mut replacement.backend, Backend::Stopped);
                 match new_backend {
                     Backend::System {
@@ -156,7 +156,9 @@ impl Advertisement {
     fn stop(&mut self) {
         let backend = std::mem::replace(&mut self.backend, Backend::Stopped);
         match backend {
-            Backend::Daemon { daemon, fullname, .. } => {
+            Backend::Daemon {
+                daemon, fullname, ..
+            } => {
                 let _ = daemon.unregister(&fullname);
                 let _ = daemon.shutdown();
             }
@@ -380,7 +382,7 @@ fn system_advertisement(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = match command.spawn() {
-        Ok(child) => child,
+        Ok(child) => crate::children::TrackedChild::new(child),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(SystemStart::Missing);
         }
@@ -501,14 +503,17 @@ pub struct PeerBrowser {
 }
 
 impl PeerBrowser {
-    pub fn open(services: &[(&str, &'static str)]) -> Result<Self> {
+    pub fn open(
+        services: &[(&str, &'static str)],
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
         let daemon = ServiceDaemon::new().map_err(|error| Error::protocol(error.to_string()))?;
         let (tx, events) = tokio::sync::mpsc::unbounded_channel();
         let mut tasks = Vec::new();
         let mut awdl_pids = Vec::new();
         for (service_type, via) in services {
             if awdl::uses_system_browse(service_type) {
-                match awdl::start_browse(service_type, via, tx.clone()) {
+                match awdl::start_browse(service_type, via, tx.clone(), cancel.clone()) {
                     Ok(browse) => {
                         awdl_pids.push(browse.pid);
                         tasks.push(browse.task);

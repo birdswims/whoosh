@@ -294,10 +294,7 @@ pub fn client_config_with_identity(
         Trust::Fingerprint(expected) => {
             authed!(rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(FingerprintVerifier::new(
-                    expected,
-                    seen.clone()
-                )))
+                .with_custom_certificate_verifier(FingerprintVerifier::new(expected, seen.clone())))
         }
     };
     rustls_config.alpn_protocols = vec![ALPN.to_vec()];

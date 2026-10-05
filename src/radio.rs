@@ -52,9 +52,19 @@ impl Radio {
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // The advertising thread can block inside IOBluetooth. Quitting must
+        // not wait on that; the process exit ends the thread.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("whoosh-ble-join".into())
+            .spawn(move || {
+                let _ = thread.join();
+                let _ = tx.send(());
+            });
+        let _ = rx.recv_timeout(Duration::from_millis(800));
     }
 }
 

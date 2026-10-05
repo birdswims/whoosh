@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,8 +66,9 @@ pub fn start_browse(
     service_type: &str,
     via: &'static str,
     tx: tokio::sync::mpsc::UnboundedSender<super::PeerUpdate>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SystemBrowse> {
-    let _ = (service_type, via, tx);
+    let _ = (service_type, via, tx, cancel);
     Err(Error::protocol(
         "AirDrop AWDL browse is only available on macOS",
     ))
@@ -83,6 +84,7 @@ pub fn start_browse(
     service_type: &str,
     via: &'static str,
     tx: tokio::sync::mpsc::UnboundedSender<super::PeerUpdate>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SystemBrowse> {
     let reg_type = dns_sd_type(service_type)?;
     let mut session = PtySession::spawn(&[
@@ -136,8 +138,9 @@ pub fn start_browse(
                         let instance = event.instance;
                         let reg_type = reg_type.clone();
                         let tx = tx.clone();
+                        let cancel = cancel.clone();
                         tokio::spawn(async move {
-                            resolve_until_settled(state, instance, reg_type, via, tx).await;
+                            resolve_until_settled(state, instance, reg_type, via, tx, cancel).await;
                         });
                     }
                 }
@@ -174,9 +177,13 @@ async fn resolve_until_settled(
     reg_type: String,
     via: &'static str,
     tx: tokio::sync::mpsc::UnboundedSender<super::PeerUpdate>,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     loop {
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(350)) => {}
+        }
         let present = {
             let guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
             guard
@@ -194,6 +201,9 @@ async fn resolve_until_settled(
         .await
         .ok()
         .flatten();
+        if cancel.is_cancelled() {
+            return;
+        }
         if let Some(mut peer) = resolved {
             let still = {
                 let guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -568,7 +578,7 @@ use std::os::unix::process::CommandExt;
 
 #[cfg(target_os = "macos")]
 struct PtySession {
-    child: Child,
+    child: crate::children::TrackedChild,
     master: std::fs::File,
 }
 
@@ -614,7 +624,7 @@ impl PtySession {
             });
         }
         let child = match command.spawn() {
-            Ok(child) => child,
+            Ok(child) => crate::children::TrackedChild::new(child),
             Err(error) => {
                 unsafe {
                     libc::close(master_fd);
@@ -877,8 +887,20 @@ fn ensure_outer_pool() {
 #[cfg(target_os = "macos")]
 pub(crate) fn stop_main_run_loop() {
     unsafe {
-        CFRunLoopStop(CFRunLoopGetMain());
+        if pthread_main_np() != 0 {
+            CFRunLoopStop(CFRunLoopGetMain());
+            return;
+        }
+        // NSRunLoop ignores a bare CFRunLoopStop from another thread, so the
+        // main thread can stay inside a two-second slice after shutdown.
+        let queue = std::ptr::addr_of!(_dispatch_main_q).cast_mut().cast();
+        dispatch_async_f(queue, std::ptr::null_mut(), stop_on_main);
     }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn stop_on_main(_context: *mut std::ffi::c_void) {
+    CFRunLoopStop(CFRunLoopGetMain());
 }
 
 #[cfg(target_os = "macos")]
@@ -1104,6 +1126,12 @@ extern "C" {
 #[link(name = "System")]
 extern "C" {
     fn pthread_main_np() -> i32;
+    static _dispatch_main_q: u8;
+    fn dispatch_async_f(
+        queue: *mut std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: unsafe extern "C" fn(*mut std::ffi::c_void),
+    );
 }
 
 #[cfg(target_os = "macos")]

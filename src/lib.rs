@@ -8,6 +8,8 @@ pub mod airdrop;
 #[allow(unsafe_code)]
 mod appctl;
 pub mod approve;
+#[allow(unsafe_code)]
+mod children;
 pub mod cli;
 pub mod discover;
 pub mod error;
