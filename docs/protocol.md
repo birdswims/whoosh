@@ -19,7 +19,7 @@ The server writes length-prefixed control messages on that stream and does not r
 | 6 | ClipboardPull | 16-byte request id |
 | 7 | Clipboard | 16-byte request id, `u32` text length, UTF-8 text, `u32` PNG length, PNG bytes |
 
-ClipboardPull asks for the receiver's current clipboard instead of offering files. The receiver answers with Clipboard, or Reject with the reason `not a trusted device`, when the client certificate's SHA-256 fingerprint is not one it has saved. Text is at most 1 MiB. A non-empty image is a PNG of at most 8 MiB and must begin with the PNG signature. The receiver keeps that snapshot in memory and does not write it to disk. File sends still use Offer and do not present a client certificate. A clipboard pull presents the caller's device certificate. The receiver accepts it only when that fingerprint is already in `known-peers`, from any earlier address. The caller also pins the receiver's fingerprint. Both computers have to trust each other.
+ClipboardPull asks for the receiver's current clipboard instead of offering files. The receiver answers with Clipboard, or Reject with the reason `not a trusted device`, when the client certificate's SHA-256 fingerprint is not one it has saved. Text is at most 1 MiB. A non-empty image is a PNG of at most 8 MiB and must begin with the PNG signature. The receiver keeps that snapshot in memory and does not write it to disk. File sends still use Offer and do not present a client certificate. A clipboard pull presents the caller's device certificate. The receiver accepts it only when that fingerprint is already in `known-peers`, from any earlier address. The caller also pins the receiver's fingerprint. Both computers have to trust each other. The desktop app adds a nearby Whoosh computer from that list and shows the clipboard control only when each announcement names the other computer. Until the other computer adds this one, the row says it is waiting. Settings lists those fingerprints and can remove one.
 
 Each offered file is `u32` id, `u64` size, `u16` name length, name, `u16` MIME length, MIME. Strings are UTF-8 and the length prefixes are little-endian. File-offer strings use a `u16` length. Clipboard text and PNG bytes use a `u32` length.
 
@@ -33,7 +33,7 @@ Up to four of those streams are active at once. Reads use 1 MiB buffers. The QUI
 
 The receiver writes `.<name>.partial`, checks the hash, then renames the file into place. A mismatch deletes the partial file.
 
-mDNS service type: `_whoosh._udp.local.` TXT keys are `n` (display name), `v` (`1`), and `fp` (fingerprint hex).
+mDNS service type: `_whoosh._udp.local.` TXT keys are `n` (display name), `v` (`1`), `fp` (fingerprint hex), and `tf0`, `tf1`, … (one lowercase fingerprint hex each) for every other computer this one has added, up to 16. Adding or removing a computer updates that record. The clipboard control is shown only when `fp` from one side appears in the other's `tf` keys and the reverse is true as well.
 
 On macOS the daemon registers through `dns-sd`. AirDrop uses `-includeAWDL` so the AWDL address stays in the answer. Quick Share and the native service are registered on the LAN interface only, so a phone is not offered a tunnel address or a proxy hostname. Other operating systems advertise with userspace mDNS and pin that same address for Quick Share and native.
 

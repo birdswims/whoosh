@@ -1,23 +1,24 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.Storage.Pickers;
 using Windows.System;
 
 namespace Whoosh;
 
-public sealed partial class SettingsWindow : Window
+public sealed partial class SettingsWindow : UserControl
 {
     readonly AppModel _model;
     bool _syncing;
     bool _nameDirty;
+
+    public event EventHandler? DismissRequested;
 
     public SettingsWindow()
     {
         InitializeComponent();
         _model = App.Model;
         Root.DataContext = _model;
-        WindowChrome.KeepAtLeast(this, 420, 520);
-        WindowChrome.Place(this, 520, 760);
         _model.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(AppModel.DeviceName) or nameof(AppModel.Native) or nameof(AppModel.Quickshare) or nameof(AppModel.Airdrop) or nameof(AppModel.SortMedia) or nameof(AppModel.RequirePin) or null)
@@ -25,10 +26,22 @@ public sealed partial class SettingsWindow : Window
                 Sync();
             }
         };
-        Closed += (_, _) => NameBox_LostFocus(NameBox, new RoutedEventArgs());
-        Activated += (_, _) => Sync();
         Sync();
     }
+
+    public void Shown()
+    {
+        Sync();
+        _model.RefreshTrusted();
+    }
+
+    public void Commit()
+    {
+        _model.ApplyName(NameBox.Text);
+        _nameDirty = false;
+    }
+
+    void Back_Click(object sender, RoutedEventArgs e) => DismissRequested?.Invoke(this, EventArgs.Empty);
 
     void Sync()
     {
@@ -67,7 +80,13 @@ public sealed partial class SettingsWindow : Window
         var picker = new FolderPicker();
         picker.FileTypeFilter.Add("*");
         picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var owner = App.Main;
+        if (owner == null)
+        {
+            return;
+        }
+
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(owner));
         var folder = await picker.PickSingleFolderAsync();
         if (folder == null || string.IsNullOrEmpty(folder.Path))
         {
@@ -88,4 +107,23 @@ public sealed partial class SettingsWindow : Window
     }
 
     void Copy_Click(object sender, RoutedEventArgs e) => _model.CopyFingerprint();
+
+    void RemoveTrusted_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button)
+        {
+            return;
+        }
+
+        var fingerprint = button.Tag as string;
+        if (string.IsNullOrEmpty(fingerprint) && button.DataContext is TrustedDevice device)
+        {
+            fingerprint = device.Fingerprint;
+        }
+
+        if (!string.IsNullOrEmpty(fingerprint))
+        {
+            _model.RemoveTrusted(fingerprint);
+        }
+    }
 }

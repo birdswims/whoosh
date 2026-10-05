@@ -49,6 +49,7 @@
                     </StackPanel>
                 </Border>
                 <Button
+                    x:Name="ActivityNav"
                     AutomationProperties.AutomationId="ActivityButton"
                     MinWidth="44"
                     MinHeight="40"
@@ -62,6 +63,7 @@
                     <FontIcon Width="22" Height="22" FontSize="16" Glyph="&#xE823;" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Button>
                 <Button
+                    x:Name="SettingsNav"
                     AutomationProperties.AutomationId="SettingsButton"
                     MinWidth="44"
                     MinHeight="40"
@@ -269,6 +271,7 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
                                         <TextBlock FontWeight="Medium" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
@@ -277,10 +280,33 @@
                                             FontSize="12"
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Text="{Binding Detail}"
-                                            TextTrimming="CharacterEllipsis" />
+                                            TextTrimming="CharacterEllipsis"
+                                            Visibility="{Binding ShowDetail, Converter={StaticResource Vis}}" />
+                                        <TextBlock
+                                            AutomationProperties.AutomationId="WaitingForTrust"
+                                            AutomationProperties.Name="{Binding WaitingText}"
+                                            FontSize="12"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="{Binding WaitingText}"
+                                            TextTrimming="CharacterEllipsis"
+                                            ToolTipService.ToolTip="{Binding WaitingText}"
+                                            Visibility="{Binding ShowWaiting, Converter={StaticResource Vis}}" />
                                     </StackPanel>
                                     <Button
                                         Grid.Column="1"
+                                        MinWidth="0"
+                                        Padding="10,4"
+                                        VerticalAlignment="Center"
+                                        AutomationProperties.AutomationId="AddTrusted"
+                                        AutomationProperties.Name="{Binding AddAccessLabel}"
+                                        Click="AddPeer_Click"
+                                        Content="Add"
+                                        Style="{StaticResource SubtleButtonStyle}"
+                                        Tag="{Binding}"
+                                        ToolTipService.ToolTip="Trust this device"
+                                        Visibility="{Binding ShowAdd, Converter={StaticResource Vis}}" />
+                                    <Button
+                                        Grid.Column="2"
                                         MinWidth="36"
                                         Padding="8,4"
                                         VerticalAlignment="Center"
@@ -292,7 +318,7 @@
                                         Visibility="{Binding ShowClipboard, Converter={StaticResource Vis}}">
                                         <FontIcon FontSize="14" Glyph="&#xE8C8;" />
                                     </Button>
-                                    <Border Grid.Column="2" Padding="8,3" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
+                                    <Border Grid.Column="3" Padding="8,3" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
                                         <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding ProtocolLabel}" />
                                     </Border>
                                 </Grid>
@@ -367,8 +393,32 @@
             </Border>
         </Grid>
 
-        <Grid x:Name="TrustLayer" Grid.RowSpan="5" Background="#66000000" Tapped="TrustSmoke_Tapped" Visibility="{Binding HasTrust, Converter={StaticResource Vis}}">
-            <Border Width="460" Padding="22" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Card}" Tapped="Card_Tapped">
+        <Grid
+            x:Name="SettingsLayer"
+            Grid.Row="2"
+            Grid.RowSpan="3"
+            Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+            Visibility="Collapsed">
+            <local:SettingsWindow x:Name="SettingsPane" />
+        </Grid>
+        <Grid
+            x:Name="ActivityLayer"
+            Grid.Row="2"
+            Grid.RowSpan="3"
+            Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+            Visibility="Collapsed">
+            <local:ActivityWindow x:Name="ActivityPane" />
+        </Grid>
+
+        <Grid x:Name="TrustLayer" Grid.RowSpan="5" Background="#B3000000" Tapped="TrustSmoke_Tapped" Visibility="{Binding HasTrust, Converter={StaticResource Vis}}">
+            <Border
+                x:Name="TrustCard"
+                Width="460"
+                Padding="22"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Style="{StaticResource Card}"
+                Tapped="Card_Tapped">
                 <StackPanel Spacing="14">
                     <TextBlock x:Name="TrustTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
                     <TextBlock x:Name="TrustBody" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />

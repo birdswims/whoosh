@@ -93,11 +93,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             NATIVE_SERVICE,
             &instance,
             listener.local_addr.port(),
-            vec![
-                ("n".into(), config.name.clone()),
-                ("v".into(), "1".into()),
-                ("fp".into(), fingerprint),
-            ],
+            crate::trust::native_txt(&config.name, &fingerprint),
         )
         .await
         {

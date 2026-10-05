@@ -3,6 +3,12 @@ import Observation
 import UniformTypeIdentifiers
 import WhooshAirDrop
 
+enum AppScreen {
+    case home
+    case settings
+    case activity
+}
+
 @Observable
 final class AppModel {
     static weak var shared: AppModel?
@@ -45,7 +51,10 @@ final class AppModel {
     var address: String?
     var warnings: [String] = []
     var sawPeers = false
+    var screen = AppScreen.home
     var peers: [Peer] = []
+    var trustedDevices: [TrustedDevice] = []
+    private var trustedReady = false
     var selectedPeerID: String?
     var files: [SendFile] = []
     var thumbnails: [String: NSImage] = [:]
@@ -308,6 +317,66 @@ final class AppModel {
         showBanner("Fingerprint copied.")
     }
 
+    func refreshTrusted() {
+        engine.send(Command(id: nextID(), op: "trusted"))
+    }
+
+    func showSettings() {
+        if screen == .settings {
+            screen = .home
+            return
+        }
+        screen = .settings
+        refreshTrusted()
+    }
+
+    func showActivity() {
+        screen = screen == .activity ? .home : .activity
+    }
+
+    func showHome() {
+        screen = .home
+    }
+
+    func addNearby(_ peer: Peer) {
+        guard peer.via == "whoosh", !engineDown, !peer.trusted else { return }
+        guard let fingerprint = peer.fingerprint, !fingerprint.isEmpty else {
+            showBanner("That device did not share a fingerprint.")
+            return
+        }
+        if fingerprint.caseInsensitiveCompare(self.fingerprint) == .orderedSame {
+            showBanner("That fingerprint is this computer.")
+            return
+        }
+        let name = peer.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        engine.send(Command(
+            id: nextID(),
+            op: "trust",
+            fingerprint: fingerprint,
+            peerName: name.isEmpty ? nil : String(name.prefix(64))
+        ))
+    }
+
+    func removeTrusted(_ fingerprint: String) {
+        guard !engineDown, !fingerprint.isEmpty else { return }
+        engine.send(Command(id: nextID(), op: "untrust", fingerprint: fingerprint))
+    }
+
+    func trustedTitle(for device: TrustedDevice) -> String {
+        let saved = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !saved.isEmpty {
+            return saved
+        }
+        if let peer = peers.first(where: { peer in
+            peer.via == "whoosh"
+                && (peer.fingerprint ?? "").caseInsensitiveCompare(device.fingerprint) == .orderedSame
+                && !peer.name.isEmpty
+        }) {
+            return peer.name
+        }
+        return device.isSelf ? "This computer" : "Trusted device"
+    }
+
     private func beginSend(_ peer: Peer, trust: Bool) {
         sending = true
         if peer.via == "airdrop" {
@@ -492,6 +561,8 @@ final class AppModel {
             }
         case "clipboard":
             applyRemoteClipboard(event)
+        case "trusted":
+            applyTrusted(event.devices ?? [])
         case "peers":
             sawPeers = true
             let incoming = event.peers ?? []
@@ -514,6 +585,9 @@ final class AppModel {
                 }
             }
             peers = incoming
+            if trustedReady {
+                syncPeerTrust()
+            }
             if selectedPeerID == nil {
                 selectedPeerID = peers.first?.id
             }
@@ -540,6 +614,23 @@ final class AppModel {
             record(event)
         default:
             break
+        }
+    }
+
+    private func applyTrusted(_ incoming: [TrustedDevice]) {
+        trustedReady = true
+        trustedDevices = incoming
+        syncPeerTrust()
+    }
+
+    private func syncPeerTrust() {
+        let allowed = Set(trustedDevices.map { $0.fingerprint.lowercased() })
+        for index in peers.indices where peers[index].via == "whoosh" {
+            let fingerprint = (peers[index].fingerprint ?? "").lowercased()
+            let trusted = !fingerprint.isEmpty && allowed.contains(fingerprint)
+            if peers[index].trusted != trusted {
+                peers[index].trusted = trusted
+            }
         }
     }
 

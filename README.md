@@ -69,9 +69,9 @@ For AirDrop, Whoosh needs both Bonjour registration and a reachable HTTPS listen
 | `--no-native`, `--no-quickshare`, `--no-airdrop` | Turn one listener off |
 | `--max-mib` | Largest accepted file, default 8192 MiB |
 
-A native sender must pass `--trust-first` the first time, after comparing the fingerprint printed by the receiver. Later sends to that address use the saved fingerprint in `~/.config/whoosh/known-peers`.
+A native sender must pass `--trust-first` the first time, after comparing the fingerprint printed by the receiver. Later sends to that address use the saved fingerprint in `~/.config/whoosh/known-peers`. Settings on the desktop app lists those computers. Add a nearby Whoosh device from that list, or remove it in Settings when it should no longer send files or copy the clipboard.
 
-The desktop app keeps the latest text or image you copy in memory. On another of your computers, click the clipboard icon beside that device's name to paste the same thing there. The copy is encrypted. Both computers have to trust each other first, so other devices on the network cannot read it. Quick Share and AirDrop rows do not offer it. The clipboard is not saved to disk.
+The desktop app keeps the latest text or image you copy in memory. On another of your computers, click the clipboard icon beside that device's name to paste the same thing there. The icon appears only after both computers have added each other. Until the other one adds this computer, the row says it is waiting. The copy is encrypted, so other devices on the network cannot read it. Quick Share and AirDrop rows do not offer it. The clipboard is not saved to disk.
 
 ## Send
 

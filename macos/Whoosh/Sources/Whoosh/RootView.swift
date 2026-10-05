@@ -5,7 +5,6 @@ import WhooshUI
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.openWindow) private var openWindow
     @State private var dropping = false
 
     var body: some View {
@@ -13,48 +12,60 @@ struct RootView: View {
             Theme.canvas
             VStack(alignment: .leading, spacing: 14) {
                 header
-                if !model.warnings.isEmpty {
-                    Text(model.warnings.joined(separator: " "))
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if !model.incomingNow.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.incomingNow) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.title)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .lineLimit(1)
-                                Text(item.subtitle)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                if item.showsProgress {
-                                    TransferBar(item: item)
-                                } else {
-                                    ProgressView()
-                                        .controlSize(.small)
+                    .padding(.horizontal, 22)
+                if model.screen == .home {
+                    VStack(alignment: .leading, spacing: 14) {
+                    if !model.warnings.isEmpty {
+                        Text(model.warnings.joined(separator: " "))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if !model.incomingNow.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.incomingNow) { item in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.title)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .lineLimit(1)
+                                    Text(item.subtitle)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    if item.showsProgress {
+                                        TransferBar(item: item)
+                                    } else {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                HStack(alignment: .top, spacing: 14) {
-                    SendCard(dropping: dropping)
+                    HStack(alignment: .top, spacing: 14) {
+                        SendCard(dropping: dropping)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        NearbyCard()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(maxHeight: .infinity)
+                    footer
+                    }
+                    .padding(.horizontal, 22)
+                    .frame(maxHeight: .infinity)
+                } else if model.screen == .settings {
+                    SettingsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    NearbyCard()
+                } else {
+                    ActivityView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxHeight: .infinity)
-                footer
             }
             .padding(.top, 36)
-            .padding(.horizontal, 22)
-            .padding(.bottom, 16)
+            .padding(.bottom, model.screen == .home ? 16 : 0)
 
             if let banner = model.banner {
                 VStack {
@@ -86,8 +97,18 @@ struct RootView: View {
         }
         .animation(.easeOut(duration: 0.16), value: model.banner)
         .animation(.easeOut(duration: 0.16), value: model.currentOffer?.id)
+        .onExitCommand {
+            if model.currentOffer != nil {
+                model.declineCurrentOffer()
+            } else if model.trustPeer != nil {
+                model.cancelTrust()
+            } else if model.screen != .home {
+                model.showHome()
+            }
+        }
         .onDrop(of: [.fileURL], isTargeted: $dropping) { providers in
-            model.takeDrop(providers)
+            guard model.screen == .home else { return false }
+            return model.takeDrop(providers)
         }
     }
 
@@ -130,24 +151,39 @@ struct RootView: View {
             .background(Capsule().fill(Color.primary.opacity(0.05)))
             HStack(spacing: 2) {
                 Button {
-                    openWindow(id: "activity")
+                    model.showActivity()
                 } label: {
                     Image(systemName: "clock")
                         .font(.system(size: 14, weight: .medium))
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
+                        .background {
+                            if model.screen == .activity {
+                                Circle().fill(Color.primary.opacity(0.08))
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .help("Activity")
                 .accessibilityLabel("Activity")
-                SettingsLink {
+                .accessibilityIdentifier("ActivityButton")
+                Button {
+                    model.showSettings()
+                } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 14, weight: .medium))
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
+                        .background {
+                            if model.screen == .settings {
+                                Circle().fill(Color.primary.opacity(0.08))
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .help("Settings")
+                .accessibilityLabel("Settings")
+                .accessibilityIdentifier("SettingsButton")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -391,7 +427,7 @@ private struct PeerRow: View {
         // that click, so choosing an iPhone never enabled Send. The clipboard
         // control stays outside that button; a nested button does not receive clicks.
         selectButton
-            .overlay(alignment: .trailing) { clipboardOverlay }
+            .overlay(alignment: .trailing) { trailingOverlay }
             .onHover { inside in
                 hovering = inside
                 if inside {
@@ -413,12 +449,24 @@ private struct PeerRow: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(peer.detail)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if peer.showsWaiting {
+                        Text(peer.waitingText)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(peer.waitingText)
+                            .accessibilityIdentifier("WaitingForTrust")
+                    } else {
+                        Text(peer.detail)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 8)
+                if peer.showsAdd {
+                    Color.clear.frame(width: 54, height: 22)
+                }
                 if peer.showsClipboard {
                     Color.clear.frame(width: 28, height: 28)
                 }
@@ -441,22 +489,35 @@ private struct PeerRow: View {
     }
 
     @ViewBuilder
-    private var clipboardOverlay: some View {
-        if peer.showsClipboard {
+    private var trailingOverlay: some View {
+        if peer.showsAdd || peer.showsClipboard {
             HStack(spacing: 10) {
-                Button {
-                    model.copyFrom(peer)
-                } label: {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
+                if peer.showsAdd {
+                    Button("Add") {
+                        model.addNearby(peer)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .frame(width: 54)
+                    .help("Trust this device")
+                    .accessibilityLabel(peer.addAccessLabel)
+                    .accessibilityIdentifier("AddTrusted")
                 }
-                .buttonStyle(.plain)
-                .help(peer.clipboardTip)
-                .accessibilityLabel(peer.clipboardAccessLabel)
-                .accessibilityIdentifier("CopyClipboard")
+                if peer.showsClipboard {
+                    Button {
+                        model.copyFrom(peer)
+                    } label: {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(peer.clipboardTip)
+                    .accessibilityLabel(peer.clipboardAccessLabel)
+                    .accessibilityIdentifier("CopyClipboard")
+                }
                 protocolBadge.hidden()
                 Circle()
                     .fill(Color.clear)

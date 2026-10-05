@@ -281,6 +281,7 @@ public sealed class AppModel : Observable
     string? _selectedPeerId;
 
     public ObservableCollection<Peer> Peers { get; } = [];
+    public ObservableCollection<TrustedDevice> TrustedDevices { get; } = [];
     public ObservableCollection<SendFile> Files { get; } = [];
     public ObservableCollection<ActivityItem> Activity { get; } = [];
 
@@ -309,6 +310,7 @@ public sealed class AppModel : Observable
     public string EngineError { get; private set; } = "";
     public bool Sending { get; private set; }
     bool _ready;
+    bool _trustedReady;
 
     public string? SelectedPeerId => _selectedPeerId;
     public Peer? SelectedPeer => Peers.FirstOrDefault(peer => peer.Id == _selectedPeerId);
@@ -317,6 +319,7 @@ public sealed class AppModel : Observable
     public bool HasOffer => CurrentOffer != null;
     public bool HasTrust => TrustPeer != null;
     public bool HasBanner => Banner.Length > 0;
+    public bool HasTrustedDevices => TrustedDevices.Count > 0;
     public bool HasWarnings => Warnings.Count > 0;
     public bool HasActivity => Activity.Count > 0;
     public bool CanClearActivity => Activity.Any(item => item.State != "working");
@@ -699,6 +702,55 @@ public sealed class AppModel : Observable
         ShowBanner("Fingerprint copied.");
     }
 
+    public void RefreshTrusted()
+    {
+        _engine.Send(new Command { Id = NextId(), Op = "trusted" });
+    }
+
+    public void AddNearby(Peer peer)
+    {
+        if (peer.Via != "whoosh" || EngineDown || peer.Trusted)
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(peer.Fingerprint))
+        {
+            ShowBanner("That device did not share a fingerprint.");
+            return;
+        }
+
+        if (string.Equals(peer.Fingerprint, Fingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowBanner("That fingerprint is this computer.");
+            return;
+        }
+
+        var name = peer.Name.Trim();
+        _engine.Send(new Command
+        {
+            Id = NextId(),
+            Op = "trust",
+            Fingerprint = peer.Fingerprint,
+            PeerName = name.Length == 0 ? null : name,
+        });
+    }
+
+    public void RemoveTrusted(string fingerprint)
+    {
+        if (EngineDown || string.IsNullOrWhiteSpace(fingerprint))
+        {
+            return;
+        }
+
+        _engine.Send(new Command
+        {
+            Id = NextId(),
+            Op = "untrust",
+            Fingerprint = fingerprint,
+        });
+    }
+
     public void ClearBanner()
     {
         Banner = "";
@@ -872,6 +924,9 @@ public sealed class AppModel : Observable
                 break;
             case "clipboard":
                 ApplyRemoteClipboard(ev);
+                break;
+            case "trusted":
+                ApplyTrusted(ev.Devices);
                 break;
             case "ack":
                 if (ev.Ok == false && !string.IsNullOrEmpty(ev.Error))
@@ -1107,7 +1162,97 @@ public sealed class AppModel : Observable
         Raise(nameof(SelectedPeer));
         PeerStamp++;
         Raise(nameof(PeerStamp));
+        if (_trustedReady)
+        {
+            SyncPeerTrust();
+        }
+
+        RefreshTrustedLabels();
         Touch();
+    }
+
+    void ApplyTrusted(IReadOnlyList<TrustedDevice>? devices)
+    {
+        _trustedReady = true;
+        TrustedDevices.Clear();
+        foreach (var device in devices ?? [])
+        {
+            ApplyTrustedLabels(device);
+            TrustedDevices.Add(device);
+        }
+
+        Raise(nameof(HasTrustedDevices));
+        SyncPeerTrust();
+        Touch();
+    }
+
+    void RefreshTrustedLabels()
+    {
+        foreach (var device in TrustedDevices)
+        {
+            ApplyTrustedLabels(device);
+        }
+    }
+
+    void ApplyTrustedLabels(TrustedDevice device)
+    {
+        var title = TrustedTitle(device);
+        device.Title = title;
+        device.RemoveLabel = $"Remove {title}";
+        device.Detail = device.IsSelf
+            ? Format.Fingerprint(device.Fingerprint) + "\nThis computer's own fingerprint."
+            : Format.Fingerprint(device.Fingerprint);
+    }
+
+    string TrustedTitle(TrustedDevice device)
+    {
+        if (!string.IsNullOrWhiteSpace(device.Name))
+        {
+            return device.Name.Trim();
+        }
+
+        foreach (var peer in Peers)
+        {
+            if (peer.Via == "whoosh"
+                && !string.IsNullOrEmpty(peer.Fingerprint)
+                && string.Equals(peer.Fingerprint, device.Fingerprint, StringComparison.OrdinalIgnoreCase)
+                && peer.Name.Length > 0)
+            {
+                return peer.Name;
+            }
+        }
+
+        return device.IsSelf ? "This computer" : "Trusted device";
+    }
+
+    void SyncPeerTrust()
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var device in TrustedDevices)
+        {
+            if (device.Fingerprint.Length > 0)
+            {
+                allowed.Add(device.Fingerprint);
+            }
+        }
+
+        for (var index = 0; index < Peers.Count; index++)
+        {
+            var peer = Peers[index];
+            if (peer.Via != "whoosh" || string.IsNullOrEmpty(peer.Fingerprint))
+            {
+                continue;
+            }
+
+            var trusted = allowed.Contains(peer.Fingerprint);
+            if (peer.Trusted == trusted)
+            {
+                continue;
+            }
+
+            peer.Trusted = trusted;
+            Peers[index] = peer;
+        }
     }
 
     void Record(WireEvent ev)

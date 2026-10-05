@@ -36,15 +36,25 @@ pub(crate) fn stop_main_run_loop() {
 pub struct Advertisement {
     backend: Backend,
     detail: String,
+    service_type: String,
 }
 
 enum Backend {
     Daemon {
         daemon: ServiceDaemon,
         fullname: String,
+        instance: String,
+        host: String,
+        ip: String,
+        port: u16,
+        addr_auto: bool,
     },
     #[cfg(target_os = "macos")]
-    System(Option<std::process::Child>),
+    System {
+        child: Option<std::process::Child>,
+        instance: String,
+        port: u16,
+    },
     Stopped,
 }
 
@@ -72,6 +82,73 @@ impl Advertisement {
         &self.detail
     }
 
+    pub fn service_type(&self) -> &str {
+        &self.service_type
+    }
+
+    /// Replace the TXT record. Userspace mDNS re-registers the same service.
+    /// `dns-sd` has no update call, so that backend restarts the registration.
+    pub fn update_txt(&mut self, txt: &[(&str, &str)]) -> Result<()> {
+        let service_type = self.service_type.clone();
+        match &mut self.backend {
+            Backend::Daemon {
+                daemon,
+                instance,
+                host,
+                ip,
+                port,
+                addr_auto,
+                ..
+            } => {
+                let mut info =
+                    ServiceInfo::new(&service_type, instance, host, ip.as_str(), *port, txt)
+                        .map_err(|error| Error::protocol(error.to_string()))?;
+                if *addr_auto {
+                    info = info.enable_addr_auto();
+                }
+                daemon
+                    .register(info)
+                    .map_err(|error| Error::protocol(error.to_string()))?;
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            Backend::System {
+                child,
+                instance,
+                port,
+            } => {
+                let instance = instance.clone();
+                let port = *port;
+                if let Some(mut old) = child.take() {
+                    let _ = old.kill();
+                    let _ = old.wait();
+                }
+                let mut replacement = match system_advertisement(&service_type, &instance, port, txt)
+                {
+                    Ok(advert) => advert,
+                    Err(SystemStart::Missing) => {
+                        return Err(Error::protocol("dns-sd is not installed"));
+                    }
+                    Err(SystemStart::Failed(error)) => return Err(error),
+                };
+                let new_backend = std::mem::replace(&mut replacement.backend, Backend::Stopped);
+                match new_backend {
+                    Backend::System {
+                        child: new_child, ..
+                    } => {
+                        *child = new_child;
+                        Ok(())
+                    }
+                    other => {
+                        drop(other);
+                        Err(Error::protocol("dns-sd did not stay registered"))
+                    }
+                }
+            }
+            Backend::Stopped => Ok(()),
+        }
+    }
+
     pub fn shutdown(mut self) {
         self.stop();
     }
@@ -79,18 +156,18 @@ impl Advertisement {
     fn stop(&mut self) {
         let backend = std::mem::replace(&mut self.backend, Backend::Stopped);
         match backend {
-            Backend::Daemon { daemon, fullname } => {
+            Backend::Daemon { daemon, fullname, .. } => {
                 let _ = daemon.unregister(&fullname);
                 let _ = daemon.shutdown();
             }
             #[cfg(target_os = "macos")]
-            Backend::System(Some(mut child)) => {
-                let _ = child.kill();
-                let _ = child.wait();
+            Backend::System { child, .. } => {
+                if let Some(mut child) = child {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
             }
             Backend::Stopped => {}
-            #[cfg(target_os = "macos")]
-            Backend::System(None) => {}
         }
     }
 }
@@ -255,8 +332,17 @@ fn userspace_advertisement(
         None => format!("userspace mDNS {fullname}"),
     };
     Ok(Advertisement {
-        backend: Backend::Daemon { daemon, fullname },
+        backend: Backend::Daemon {
+            daemon,
+            fullname,
+            instance: instance.to_string(),
+            host,
+            ip,
+            port,
+            addr_auto: pinned.is_none(),
+        },
         detail,
+        service_type: service_type.to_string(),
     })
 }
 
@@ -306,8 +392,13 @@ fn system_advertisement(
         return Err(SystemStart::Failed(error));
     }
     Ok(Advertisement {
-        backend: Backend::System(Some(child)),
+        backend: Backend::System {
+            child: Some(child),
+            instance: instance.to_string(),
+            port,
+        },
         detail: plan.summary,
+        service_type: service_type.to_string(),
     })
 }
 

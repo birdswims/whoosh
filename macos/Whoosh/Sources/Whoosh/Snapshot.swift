@@ -30,8 +30,8 @@ enum Snapshot {
         try render(RootView().environment(offerModel()), name: "offer-dark", scheme: .dark, width: 1000, height: 720, to: root)
         try render(RootView().environment(trustModel()), name: "trust-light", scheme: .light, width: 1000, height: 720, to: root)
         try render(RootView().environment(stoppedModel()), name: "stopped-light", scheme: .light, width: 1000, height: 720, to: root)
-        try render(SettingsView().environment(populated()), name: "settings-light", scheme: .light, width: 460, height: 640, to: root)
-        try render(SettingsView().environment(populated()), name: "settings-dark", scheme: .dark, width: 460, height: 640, to: root)
+        try render(SettingsView().environment(populated()), name: "settings-light", scheme: .light, width: 460, height: 820, to: root)
+        try render(SettingsView().environment(populated()), name: "settings-dark", scheme: .dark, width: 460, height: 820, to: root)
         try render(ActivityView().environment(populated()), name: "activity-light", scheme: .light, width: 480, height: 560, to: root)
         try render(ActivityView().environment(populated()), name: "activity-dark", scheme: .dark, width: 480, height: 560, to: root)
         try render(ActivityView().environment(emptyModel()), name: "activity-empty", scheme: .light, width: 480, height: 560, to: root)
@@ -74,11 +74,19 @@ enum Snapshot {
         model.pin = "1842"
         model.sawPeers = true
         model.peers = [
-            Peer(id: "whoosh|192.168.1.30:45823", via: "whoosh", name: "Office Mac", detail: "ab12 cd34", address: "192.168.1.30:45823", fingerprint: "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12", trusted: true),
+            Peer(id: "whoosh|192.168.1.30:45823", via: "whoosh", name: "Office Mac", detail: "ab12 cd34", address: "192.168.1.30:45823", fingerprint: "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12", trusted: true, trustsUs: true),
             Peer(id: "quickshare|192.168.1.40:12345", via: "quickshare", name: "Pixel", detail: "192.168.1.40:12345", address: "192.168.1.40:12345", fingerprint: nil, trusted: false),
             Peer(id: "airdrop|192.168.1.50:8770", via: "airdrop", name: "AirDrop device", detail: "192.168.1.50:8770", address: "192.168.1.50:8770", fingerprint: nil, trusted: false),
         ]
         model.selectedPeerID = model.peers[0].id
+        model.trustedDevices = [
+            TrustedDevice(
+                fingerprint: "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+                name: "Office Mac",
+                addresses: ["192.168.1.30:45823"],
+                isSelf: false
+            ),
+        ]
         model.files = [
             SendFile(path: "/tmp/vacation.jpg", name: "vacation.jpg"),
             SendFile(path: "/tmp/clip.mp4", name: "clip.mp4"),

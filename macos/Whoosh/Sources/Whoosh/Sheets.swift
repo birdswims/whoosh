@@ -96,7 +96,7 @@ struct TrustOverlay: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.28)
+            Color.black.opacity(0.62)
                 .ignoresSafeArea()
                 .onTapGesture { model.cancelTrust() }
             if let peer = model.trustPeer {
@@ -139,7 +139,7 @@ struct TrustOverlay: View {
                 }
                 .padding(22)
                 .frame(width: 440)
-                .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .strokeBorder(Theme.hairline, lineWidth: 1)
@@ -179,9 +179,19 @@ struct ActivityView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 10) {
-                WhooshMark()
-                    .frame(width: 28, height: 28)
+            HStack(spacing: 8) {
+                Button {
+                    model.showHome()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Back")
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("ActivityBack")
                 Text("Activity")
                     .font(.system(size: 18, weight: .semibold))
                 Spacer()
@@ -300,10 +310,21 @@ struct SettingsView: View {
     @FocusState private var nameFocused: Bool
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 10) {
-                WhooshMark()
-                    .frame(width: 28, height: 28)
+            HStack(spacing: 8) {
+                Button {
+                    model.showHome()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Back")
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("SettingsBack")
                 Text("Settings")
                     .font(.system(size: 18, weight: .semibold))
                 Spacer()
@@ -407,6 +428,61 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Trusted devices")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text("Whoosh computers this one trusts. They can send files here and copy this computer's clipboard. Add one from the nearby list.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 8) {
+                    if model.trustedDevices.isEmpty {
+                        Text("No trusted devices.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 8)
+                            .accessibilityIdentifier("TrustedEmpty")
+                    }
+                    ForEach(model.trustedDevices) { device in
+                        HStack(alignment: .center, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.trustedTitle(for: device))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
+                                if device.isSelf {
+                                    Text("This computer's own fingerprint.")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text(groupedFingerprint(device.fingerprint))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            Button("Remove") {
+                                model.removeTrusted(device.fingerprint)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityIdentifier("RemoveTrusted")
+                            .accessibilityLabel("Remove \(model.trustedTitle(for: device))")
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.primary.opacity(0.03))
+                )
+            }
+
             if !model.visibility.isEmpty {
                 Text(model.visibility)
                     .font(.system(size: 12))
@@ -415,11 +491,14 @@ struct SettingsView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 460, maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.canvas)
         .onAppear {
             draftName = model.deviceName
             nameDirty = false
+            model.refreshTrusted()
         }
         .onChange(of: model.deviceName) { _, name in
             if !nameDirty && !nameFocused {

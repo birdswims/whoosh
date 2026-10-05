@@ -32,28 +32,20 @@ struct WhooshApp: App {
         .commands {
             WhooshWindowCommands()
         }
-
-        Window("Activity", id: "activity") {
-            ActivityView()
-                .environment(model)
-        }
-        .defaultSize(width: 480, height: 560)
-        .windowResizability(.contentMinSize)
-
-        Settings {
-            SettingsView()
-                .environment(model)
-        }
     }
 }
 
 private struct WhooshWindowCommands: Commands {
-    @Environment(\.openWindow) private var openWindow
-
     var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                AppModel.shared?.showSettings()
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
         CommandGroup(after: .windowList) {
             Button("Activity") {
-                openWindow(id: "activity")
+                AppModel.shared?.showActivity()
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
         }

@@ -6,8 +6,6 @@ public partial class App : Application
 {
     public static AppModel Model { get; private set; } = null!;
     public static MainWindow? Main { get; set; }
-    public static Window? SettingsWindow { get; set; }
-    public static Window? ActivityWindow { get; set; }
     public static string[] LaunchFiles { get; set; } = [];
 
     public App()

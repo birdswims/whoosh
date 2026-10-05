@@ -3,15 +3,17 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace Whoosh;
 
-public sealed partial class ActivityWindow : Window
+public sealed partial class ActivityWindow : UserControl
 {
+    public event EventHandler? DismissRequested;
+
     public ActivityWindow()
     {
         InitializeComponent();
         Root.DataContext = App.Model;
-        WindowChrome.KeepAtLeast(this, 420, 420);
-        WindowChrome.Place(this, 480, 560);
     }
+
+    void Back_Click(object sender, RoutedEventArgs e) => DismissRequested?.Invoke(this, EventArgs.Empty);
 
     void Clear_Click(object sender, RoutedEventArgs e) => App.Model.ClearActivity();
 

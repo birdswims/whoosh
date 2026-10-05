@@ -34,6 +34,7 @@ struct Peer: Identifiable, Decodable, Hashable {
     var address: String
     var fingerprint: String?
     var trusted: Bool
+    var trustsUs: Bool = false
     var airdropTarget: AirDropTarget?
 }
 
@@ -68,6 +69,7 @@ struct WireEvent: Decodable {
     var nativePort: Int?
     var warnings: [String]?
     var peers: [Peer]?
+    var devices: [TrustedDevice]?
     var via: String?
     var peer: String?
     var files: [OfferFile]?
@@ -83,20 +85,34 @@ struct WireEvent: Decodable {
     var imagePng: String? = nil
 }
 
+struct TrustedDevice: Decodable, Identifiable, Hashable {
+    var fingerprint: String
+    var name: String
+    var addresses: [String] = []
+    var isSelf: Bool = false
+    var id: String { fingerprint }
+}
+
 extension Peer {
-    var showsClipboard: Bool { via == "whoosh" }
-
-    var clipboardTip: String {
-        trusted
-            ? "Copy the clipboard from this device"
-            : "Trust this device to copy its clipboard"
+    var showsClipboard: Bool {
+        via == "whoosh" && trusted && trustsUs && !(fingerprint ?? "").isEmpty
     }
 
-    var clipboardAccessLabel: String {
-        trusted
-            ? "Copy clipboard from \(name)"
-            : "Trust \(name) to copy its clipboard"
+    var showsWaiting: Bool {
+        via == "whoosh" && trusted && !trustsUs && !(fingerprint ?? "").isEmpty
     }
+
+    var showsAdd: Bool {
+        via == "whoosh" && !trusted && !(fingerprint ?? "").isEmpty
+    }
+
+    var addAccessLabel: String { "Add \(name)" }
+
+    var waitingText: String { "Waiting for \(name) to add this computer" }
+
+    var clipboardTip: String { "Copy the clipboard from this device" }
+
+    var clipboardAccessLabel: String { "Copy clipboard from \(name)" }
 }
 
 struct Offer: Identifiable, Equatable {

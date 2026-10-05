@@ -17,7 +17,7 @@ use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -185,6 +185,7 @@ struct Listed {
     address: String,
     fingerprint: Option<String>,
     trusted: bool,
+    trusts_us: bool,
     instance: String,
     airdrop_target: Option<Value>,
 }
@@ -207,6 +208,7 @@ struct Host {
     incoming: Arc<Mutex<Vec<LiveReceive>>>,
     filter: Arc<Mutex<Filter>>,
     clipboard: ClipboardStore,
+    trust_changed: Arc<Notify>,
 }
 
 struct SendJob {
@@ -218,6 +220,8 @@ struct SendJob {
     fingerprint: Option<String>,
     peer_name: String,
     sender_name: String,
+    own_fingerprint: String,
+    trust_changed: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -298,9 +302,14 @@ async fn serve(
         warnings: Vec::new(),
         offers: Arc::new(Mutex::new(HashMap::new())),
         incoming: Arc::new(Mutex::new(Vec::new())),
-        filter: Arc::new(Mutex::new(Filter::default())),
+        filter: Arc::new(Mutex::new(Filter {
+            fingerprint: Some(fingerprint.clone()),
+            ..Filter::default()
+        })),
         clipboard: ClipboardStore::default(),
+        trust_changed: Arc::new(Notify::new()),
     };
+    let trust_changed = host.trust_changed.clone();
     emit.event(json!({
         "ev": "hello",
         "version": env!("CARGO_PKG_VERSION"),
@@ -308,6 +317,7 @@ async fn serve(
         "fingerprint": fingerprint,
     }));
     emit.event(status(&host));
+    emit_trusted(&emit, &host.fingerprint);
 
     let watch = if options.watch {
         let cancel = CancellationToken::new();
@@ -328,6 +338,9 @@ async fn serve(
                 if !dispatch(&mut host, incoming, &emit).await {
                     break;
                 }
+            }
+            _ = trust_changed.notified() => {
+                publish_trust_announcement(&mut host);
             }
             _ = &mut stop => break,
         }
@@ -374,6 +387,7 @@ async fn handle(host: &mut Host, command: &Command, emit: &Emit) -> Result<()> {
                 "fingerprint": host.fingerprint,
             }));
             emit.event(status(host));
+            emit_trusted(emit, &host.fingerprint);
             Ok(())
         }
         "configure" => {
@@ -424,11 +438,37 @@ async fn handle(host: &mut Host, command: &Command, emit: &Emit) -> Result<()> {
             host.clipboard.publish(text, image_png)
         }
         "clipboard-pull" => {
+            let trusted_now = command.trust.unwrap_or(false);
             let job = prepare_clipboard_pull(host, command)?;
+            if trusted_now {
+                emit_trusted(emit, &host.fingerprint);
+                publish_trust_announcement(host);
+            }
             let emit = emit.clone();
             tokio::spawn(async move {
                 run_clipboard_pull(job, emit).await;
             });
+            Ok(())
+        }
+        "trusted" => {
+            emit_trusted(emit, &host.fingerprint);
+            Ok(())
+        }
+        "trust" => {
+            let fingerprint = require_fingerprint(command)?;
+            if fingerprint_hex(&fingerprint).eq_ignore_ascii_case(&host.fingerprint) {
+                return Err(Error::protocol("That fingerprint is this computer."));
+            }
+            trust::trust_fingerprint(&fingerprint, command.peer_name.as_deref().unwrap_or(""))?;
+            emit_trusted(emit, &host.fingerprint);
+            publish_trust_announcement(host);
+            Ok(())
+        }
+        "untrust" => {
+            let fingerprint = require_fingerprint(command)?;
+            trust::forget_fingerprint(&fingerprint)?;
+            emit_trusted(emit, &host.fingerprint);
+            publish_trust_announcement(host);
             Ok(())
         }
         other => Err(Error::protocol(format!("unknown command {other}"))),
@@ -577,11 +617,7 @@ async fn start_native(
         native::SERVICE_TYPE,
         &instance,
         port,
-        vec![
-            ("n".into(), host.config.name.clone()),
-            ("v".into(), "1".into()),
-            ("fp".into(), fingerprint),
-        ],
+        trust::native_txt(&host.config.name, &fingerprint),
     )
     .await
     {
@@ -1016,8 +1052,13 @@ fn prepare_clipboard_pull(host: &Host, command: &Command) -> Result<ClipboardJob
     let fingerprint = trust::parse_fingerprint(text)
         .ok_or_else(|| Error::protocol("fingerprint is invalid"))?;
     let already = trust::fingerprint_is_trusted(&fingerprint) || trust::remembered(&addr).is_some();
+    let peer_name = command
+        .peer_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(target);
     if command.trust.unwrap_or(false) {
-        trust::remember(&addr, &fingerprint)?;
+        trust::remember_named(&addr, &fingerprint, &peer_name)?;
     } else if !already {
         return Err(Error::protocol(
             "trust this device before copying its clipboard",
@@ -1026,11 +1067,7 @@ fn prepare_clipboard_pull(host: &Host, command: &Command) -> Result<ClipboardJob
     Ok(ClipboardJob {
         addr,
         fingerprint,
-        peer_name: command
-            .peer_name
-            .clone()
-            .filter(|name| !name.is_empty())
-            .unwrap_or(target),
+        peer_name,
         sender_name: host.config.name.clone(),
         identity_cert: host.cert_der.clone(),
         identity_key: host.key_der.clone(),
@@ -1138,6 +1175,8 @@ fn prepare_send(host: &Host, command: &Command) -> Result<SendJob> {
         trust: command.trust.unwrap_or(false),
         fingerprint: command.fingerprint.clone().filter(|text| !text.is_empty()),
         sender_name: host.config.name.clone(),
+        own_fingerprint: host.fingerprint.clone(),
+        trust_changed: host.trust_changed.clone(),
     })
 }
 
@@ -1208,19 +1247,24 @@ async fn run_send(job: SendJob, emit: Emit) {
         );
     });
     match perform_send(&job, &stages, &bytes).await {
-        Ok(sent) => activity(
-            &emit,
-            &id,
-            "out",
-            "done",
-            &files_phrase(count, "Sent"),
-            &format!("to {}", job.peer_name),
-            &job.peer_name,
-            &job.via,
-            Some(sent),
-            Some(sent),
-            None,
-        ),
+        Ok(sent) => {
+            if job.via == "whoosh" {
+                emit_trusted(&emit, &job.own_fingerprint);
+            }
+            activity(
+                &emit,
+                &id,
+                "out",
+                "done",
+                &files_phrase(count, "Sent"),
+                &format!("to {}", job.peer_name),
+                &job.peer_name,
+                &job.via,
+                Some(sent),
+                Some(sent),
+                None,
+            );
+        }
         Err(error) => activity(
             &emit,
             &id,
@@ -1262,7 +1306,8 @@ async fn perform_send(
                 .and_then(trust::parse_fingerprint)
                 .unwrap_or(report.fingerprint);
             if fingerprint != [0u8; 32] {
-                trust::remember(&addr, &fingerprint)?;
+                trust::remember_named(&addr, &fingerprint, &job.peer_name)?;
+                job.trust_changed.notify_one();
             }
             Ok(report.bytes)
         }
@@ -1412,7 +1457,7 @@ fn apply_update(roster: &mut Roster, filter: &Mutex<Filter>, update: PeerUpdate)
     match update {
         PeerUpdate::Resolved { via, peer } => {
             let fullname = peer.fullname.clone();
-            let listed = list_found(via, peer);
+            let listed = list_found(via, peer, current.fingerprint.as_deref());
             let hidden = current.hides(&listed);
             roster.resolve(&fullname, listed, hidden);
         }
@@ -1433,11 +1478,11 @@ fn publish_peers(previous: &mut String, roster: &Roster, emit: &Emit, allow_empt
     }
 }
 
-fn list_found(via: &str, peer: FoundPeer) -> Listed {
+fn list_found(via: &str, peer: FoundPeer, own_fingerprint: Option<&str>) -> Listed {
     match via {
         "quickshare" => list_quickshare(peer),
         "airdrop" => list_airdrop(peer),
-        _ => list_native(peer),
+        _ => list_native(peer, own_fingerprint),
     }
 }
 
@@ -1595,6 +1640,7 @@ fn merge_listed(stored: &mut Listed, fresh: Listed, take_fresh_address: bool) {
         stored.name = fresh.name;
     }
     stored.trusted = fresh.trusted;
+    stored.trusts_us = fresh.trusts_us;
     if fresh.fingerprint.is_some() {
         stored.fingerprint = fresh.fingerprint;
     }
@@ -1644,7 +1690,7 @@ fn dns_key(name: &str) -> String {
     name.trim_matches('.').to_ascii_lowercase()
 }
 
-fn list_native(peer: FoundPeer) -> Listed {
+fn list_native(peer: FoundPeer, own_fingerprint: Option<&str>) -> Listed {
     let name = peer
         .txt
         .get("n")
@@ -1661,6 +1707,12 @@ fn list_native(peer: FoundPeer) -> Listed {
         .and_then(trust::parse_fingerprint)
         .is_some_and(|fingerprint| trust::fingerprint_is_trusted(&fingerprint))
         || trust::remembered(&peer.addr).is_some();
+    let trusts_us = own_fingerprint.is_some_and(|own| {
+        trust::announcement_trusts_us(
+            peer.txt.iter().map(|(key, value)| (key.as_str(), value.as_str())),
+            own,
+        )
+    });
     let address = peer.addr.to_string();
     let detail = fingerprint
         .as_deref()
@@ -1672,6 +1724,7 @@ fn list_native(peer: FoundPeer) -> Listed {
         name,
         detail,
         trusted,
+        trusts_us,
         fingerprint,
         address,
         instance: peer.instance,
@@ -1702,6 +1755,7 @@ fn list_quickshare(peer: FoundPeer) -> Listed {
         address,
         fingerprint: None,
         trusted: false,
+        trusts_us: false,
         instance: peer.instance,
         airdrop_target: None,
     }
@@ -1736,6 +1790,7 @@ fn list_airdrop(peer: FoundPeer) -> Listed {
         address,
         fingerprint: None,
         trusted: false,
+        trusts_us: false,
         instance: peer.instance,
         airdrop_target: Some(target),
     }
@@ -1769,6 +1824,7 @@ fn listed_json(peer: &Listed) -> Value {
         "address": peer.address,
         "fingerprint": peer.fingerprint,
         "trusted": peer.trusted,
+        "trusts_us": peer.trusts_us,
         "airdrop_target": peer.airdrop_target,
     })
 }
@@ -1808,10 +1864,7 @@ impl Host {
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
         let Some(runtime) = self.runtime.take() else {
-            *self
-                .filter
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = Filter::default();
+            self.clear_runtime_filter();
             return;
         };
         runtime.cancel.cancel();
@@ -1822,12 +1875,74 @@ impl Host {
             advert.shutdown();
         }
         drop(runtime.radio);
+        self.clear_runtime_filter();
+        self.warnings.clear();
+    }
+
+    fn clear_runtime_filter(&mut self) {
+        let fingerprint = self
+            .filter
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .fingerprint
+            .clone();
         *self
             .filter
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Filter::default();
-        self.warnings.clear();
+            .unwrap_or_else(|poison| poison.into_inner()) = Filter {
+            fingerprint,
+            ..Filter::default()
+        };
     }
+}
+
+fn publish_trust_announcement(host: &mut Host) {
+    let Some(runtime) = host.runtime.as_mut() else {
+        return;
+    };
+    let txt = trust::native_txt(&host.config.name, &host.fingerprint);
+    let pairs: Vec<(&str, &str)> = txt
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    for advert in &mut runtime.adverts {
+        if advert.service_type() != native::SERVICE_TYPE {
+            continue;
+        }
+        if let Err(error) = advert.update_txt(&pairs) {
+            tracing::warn!(%error, "trusted-device announcement was not updated");
+        }
+    }
+}
+
+fn require_fingerprint(command: &Command) -> Result<[u8; 32]> {
+    let text = command.fingerprint.as_deref().unwrap_or("").trim();
+    if text.is_empty() {
+        return Err(Error::protocol(
+            "Enter the fingerprint from Settings on the other computer.",
+        ));
+    }
+    trust::parse_fingerprint(text).ok_or_else(|| {
+        Error::protocol("Enter the fingerprint from Settings on the other computer.")
+    })
+}
+
+fn emit_trusted(emit: &Emit, own: &str) {
+    let devices = trust::list_trusted()
+        .into_iter()
+        .map(|device| {
+            json!({
+                "fingerprint": device.fingerprint,
+                "name": device.name,
+                "addresses": device.addresses,
+                "is_self": device.fingerprint.eq_ignore_ascii_case(own),
+            })
+        })
+        .collect::<Vec<_>>();
+    emit.event(json!({
+        "ev": "trusted",
+        "devices": devices,
+    }));
 }
 
 fn status(host: &Host) -> Value {
@@ -2251,6 +2366,52 @@ mod tests {
         assert_eq!(command.max_mib, Some(512));
     }
 
+    #[test]
+    fn clipboard_requires_their_announcement() {
+        let own = "ab".repeat(32);
+        let other = "cd".repeat(32);
+        let mut txt = HashMap::new();
+        txt.insert("n".into(), "Harry's whoosh Mac".into());
+        txt.insert("fp".into(), other.clone());
+        txt.insert("tf0".into(), own.clone());
+        let listed = list_native(found_whoosh(txt), Some(&own));
+        assert!(listed.trusts_us);
+        assert_eq!(listed_json(&listed)["trusts_us"], json!(true));
+
+        let mut silent = HashMap::new();
+        silent.insert("fp".into(), other);
+        let waiting = list_native(found_whoosh(silent), Some(&own));
+        assert!(!waiting.trusts_us);
+        assert_eq!(listed_json(&waiting)["trusts_us"], json!(false));
+
+        let mut stored = waiting.clone();
+        stored.trusts_us = false;
+        merge_listed(&mut stored, listed, false);
+        assert!(stored.trusts_us);
+    }
+
+    fn found_whoosh(txt: HashMap<String, String>) -> FoundPeer {
+        FoundPeer {
+            instance: "abcd".into(),
+            fullname: "abcd._whoosh._udp.local.".into(),
+            addr: "192.168.1.9:9".parse().unwrap(),
+            txt,
+            txt_raw: HashMap::new(),
+            hostname: "whoosh.local.".into(),
+        }
+    }
+
+    #[test]
+    fn parses_a_trust_command() {
+        let command: Command = serde_json::from_str(
+            r#"{"id":"1","op":"trust","fingerprint":"ab","peer_name":"Office Mac"}"#,
+        )
+        .unwrap();
+        assert_eq!(command.op, "trust");
+        assert_eq!(command.peer_name.as_deref(), Some("Office Mac"));
+        assert_eq!(command.fingerprint.as_deref(), Some("ab"));
+    }
+
     #[tokio::test]
     async fn device_identity_survives_a_reload_and_binds() {
         let dir = tempfile::tempdir().unwrap();
@@ -2321,6 +2482,7 @@ mod tests {
             address,
             fingerprint,
             trusted: false,
+            trusts_us: false,
             instance: instance.into(),
             airdrop_target: None,
         }

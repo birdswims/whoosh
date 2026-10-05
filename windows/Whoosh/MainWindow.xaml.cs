@@ -26,10 +26,13 @@ public sealed partial class MainWindow : Window
         WindowChrome.PrepareTitleBar(this);
         WindowChrome.KeepAtLeast(this, 900, 640);
         _model.PropertyChanged += Model_Changed;
+        SettingsPane.DismissRequested += (_, _) => ShowHome();
+        ActivityPane.DismissRequested += (_, _) => ShowHome();
+        Root.ActualThemeChanged += (_, _) => PaintTrustCard();
+        PaintTrustCard();
         Closed += (_, _) =>
         {
-            App.SettingsWindow?.Close();
-            App.ActivityWindow?.Close();
+            SettingsPane.Commit();
             _model.Shutdown();
         };
         Activated += (_, _) =>
@@ -135,6 +138,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        PaintTrustCard();
         TrustTitle.Text = $"Trust {peer.Name}?";
         TrustConfirm.Content = _model.TrustForClipboard ? "Trust and copy" : "Trust and send";
         if (!string.IsNullOrEmpty(peer.Fingerprint))
@@ -150,6 +154,15 @@ public sealed partial class MainWindow : Window
             TrustBody.Text = $"This device did not share a fingerprint. Trusting it remembers {peer.Address} for later sends.";
             TrustPrint.Visibility = Visibility.Collapsed;
         }
+    }
+
+    void PaintTrustCard()
+    {
+        var dark = Root.ActualTheme != ElementTheme.Light;
+        var color = dark
+            ? Windows.UI.Color.FromArgb(255, 44, 44, 44)
+            : Windows.UI.Color.FromArgb(255, 255, 255, 255);
+        TrustCard.Background = new SolidColorBrush(color);
     }
 
     void RestoreSelection()
@@ -187,6 +200,11 @@ public sealed partial class MainWindow : Window
     void ChooseFiles_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!HomeVisible)
+        {
+            return;
+        }
+
         _ = ChooseFilesAsync();
     }
 
@@ -210,7 +228,7 @@ public sealed partial class MainWindow : Window
     void Send_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        if (_model.CanSend)
+        if (HomeVisible && _model.CanSend)
         {
             _model.Send();
         }
@@ -224,38 +242,70 @@ public sealed partial class MainWindow : Window
 
     void Activity_Click(object sender, RoutedEventArgs e)
     {
-        if (App.ActivityWindow == null)
+        if (ActivityLayer.Visibility == Visibility.Visible)
         {
-            var window = new ActivityWindow();
-            window.Closed += (_, _) =>
-            {
-                if (ReferenceEquals(App.ActivityWindow, window))
-                {
-                    App.ActivityWindow = null;
-                }
-            };
-            App.ActivityWindow = window;
+            ShowHome();
+            return;
         }
 
-        App.ActivityWindow.Activate();
+        if (SettingsLayer.Visibility == Visibility.Visible)
+        {
+            SettingsPane.Commit();
+        }
+
+        SettingsLayer.Visibility = Visibility.Collapsed;
+        ActivityLayer.Visibility = Visibility.Visible;
+        MarkPageButtons();
     }
 
     void Settings_Click(object sender, RoutedEventArgs e)
     {
-        if (App.SettingsWindow == null)
+        if (SettingsLayer.Visibility == Visibility.Visible)
         {
-            var window = new SettingsWindow();
-            window.Closed += (_, _) =>
-            {
-                if (ReferenceEquals(App.SettingsWindow, window))
-                {
-                    App.SettingsWindow = null;
-                }
-            };
-            App.SettingsWindow = window;
+            ShowHome();
+            return;
         }
 
-        App.SettingsWindow.Activate();
+        ActivityLayer.Visibility = Visibility.Collapsed;
+        SettingsLayer.Visibility = Visibility.Visible;
+        SettingsPane.Shown();
+        MarkPageButtons();
+    }
+
+    void ShowHome()
+    {
+        if (SettingsLayer.Visibility == Visibility.Visible)
+        {
+            SettingsPane.Commit();
+        }
+
+        SettingsLayer.Visibility = Visibility.Collapsed;
+        ActivityLayer.Visibility = Visibility.Collapsed;
+        MarkPageButtons();
+    }
+
+    bool HomeVisible => SettingsLayer.Visibility != Visibility.Visible && ActivityLayer.Visibility != Visibility.Visible;
+
+    void MarkPageButtons()
+    {
+        var active = Application.Current.Resources["SubtleFillColorSecondaryBrush"] as Brush;
+        if (SettingsLayer.Visibility == Visibility.Visible)
+        {
+            SettingsNav.Background = active;
+        }
+        else
+        {
+            SettingsNav.ClearValue(Control.BackgroundProperty);
+        }
+
+        if (ActivityLayer.Visibility == Visibility.Visible)
+        {
+            ActivityNav.Background = active;
+        }
+        else
+        {
+            ActivityNav.ClearValue(Control.BackgroundProperty);
+        }
     }
 
     void SaveFolder_Click(object sender, RoutedEventArgs e) => _model.RevealSaveFolder();
@@ -276,6 +326,14 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    void AddPeer_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: Peer peer })
+        {
+            _model.AddNearby(peer);
+        }
+    }
+
     void PeerList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_refreshingPeers)
@@ -291,6 +349,12 @@ public sealed partial class MainWindow : Window
 
     void Root_DragOver(object sender, DragEventArgs e)
     {
+        if (!HomeVisible)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
+
         e.AcceptedOperation = DataPackageOperation.Copy;
         e.DragUIOverride.Caption = "Add files";
         e.DragUIOverride.IsCaptionVisible = true;
@@ -308,7 +372,7 @@ public sealed partial class MainWindow : Window
     async void Root_Drop(object sender, DragEventArgs e)
     {
         Root_DragLeave(sender, e);
-        if (!e.DataView.Contains(StandardDataFormats.StorageItems))
+        if (!HomeVisible || !e.DataView.Contains(StandardDataFormats.StorageItems))
         {
             return;
         }
@@ -332,6 +396,11 @@ public sealed partial class MainWindow : Window
         else if (_model.TrustPeer != null)
         {
             _model.CancelTrust();
+            e.Handled = true;
+        }
+        else if (!HomeVisible)
+        {
+            ShowHome();
             e.Handled = true;
         }
     }

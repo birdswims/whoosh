@@ -68,7 +68,7 @@ public sealed class Command
     public string? ImagePng { get; set; }
 }
 
-public sealed class Peer
+public sealed class Peer : Observable
 {
     [JsonPropertyName("id")]
     public string Id { get; set; } = "";
@@ -88,20 +88,104 @@ public sealed class Peer
     [JsonPropertyName("fingerprint")]
     public string? Fingerprint { get; set; }
 
+    bool _trusted;
+
     [JsonPropertyName("trusted")]
-    public bool Trusted { get; set; }
+    public bool Trusted
+    {
+        get => _trusted;
+        set
+        {
+            if (_trusted == value)
+            {
+                return;
+            }
+
+            _trusted = value;
+            Raise(nameof(Trusted));
+            Raise(nameof(ShowAdd));
+            Raise(nameof(ShowClipboard));
+            Raise(nameof(ShowWaiting));
+            Raise(nameof(ShowDetail));
+            Raise(nameof(ClipboardTip));
+            Raise(nameof(ClipboardAccessLabel));
+        }
+    }
+
+    bool _trustsUs;
+
+    [JsonPropertyName("trusts_us")]
+    public bool TrustsUs
+    {
+        get => _trustsUs;
+        set
+        {
+            if (_trustsUs == value)
+            {
+                return;
+            }
+
+            _trustsUs = value;
+            Raise(nameof(TrustsUs));
+            Raise(nameof(ShowClipboard));
+            Raise(nameof(ShowWaiting));
+            Raise(nameof(ShowDetail));
+        }
+    }
 
     public string ProtocolLabel => Format.Protocol(Via);
 
-    public bool ShowClipboard => Via == "whoosh";
+    public bool ShowClipboard => Via == "whoosh" && Trusted && TrustsUs && !string.IsNullOrEmpty(Fingerprint);
 
-    public string ClipboardTip => Trusted
-        ? "Copy the clipboard from this device"
-        : "Trust this device to copy its clipboard";
+    public bool ShowWaiting => Via == "whoosh" && Trusted && !TrustsUs && !string.IsNullOrEmpty(Fingerprint);
 
-    public string ClipboardAccessLabel => Trusted
-        ? $"Copy clipboard from {Name}"
-        : $"Trust {Name} to copy its clipboard";
+    public bool ShowDetail => !ShowWaiting;
+
+    public bool ShowAdd => Via == "whoosh" && !Trusted && !string.IsNullOrEmpty(Fingerprint);
+
+    public string AddAccessLabel => $"Add {Name}";
+
+    public string WaitingText => $"Waiting for {Name} to add this computer";
+
+    public string ClipboardTip => "Copy the clipboard from this device";
+
+    public string ClipboardAccessLabel => $"Copy clipboard from {Name}";
+}
+
+public sealed class TrustedDevice : Observable
+{
+    [JsonPropertyName("fingerprint")]
+    public string Fingerprint { get; set; } = "";
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    [JsonPropertyName("addresses")]
+    public List<string> Addresses { get; set; } = [];
+
+    [JsonPropertyName("is_self")]
+    public bool IsSelf { get; set; }
+
+    string _title = "";
+    public string Title
+    {
+        get => _title;
+        set => Set(ref _title, value);
+    }
+
+    string _detail = "";
+    public string Detail
+    {
+        get => _detail;
+        set => Set(ref _detail, value);
+    }
+
+    string _removeLabel = "Remove";
+    public string RemoveLabel
+    {
+        get => _removeLabel;
+        set => Set(ref _removeLabel, value);
+    }
 }
 
 public sealed class OfferFile
@@ -184,6 +268,9 @@ public sealed class WireEvent
 
     [JsonPropertyName("peers")]
     public List<Peer>? Peers { get; set; }
+
+    [JsonPropertyName("devices")]
+    public List<TrustedDevice>? Devices { get; set; }
 
     [JsonPropertyName("via")]
     public string? Via { get; set; }
