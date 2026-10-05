@@ -53,6 +53,9 @@ final class AppModel {
     var sawPeers = false
     var screen = AppScreen.home
     var peers: [Peer] = []
+    var primaryPeers: [Peer] { PeerGrouping.primary(in: peers) }
+    var hiddenPeers: [Peer] { PeerGrouping.hidden(in: peers) }
+    var hiddenDevicesTitle: String { "Hidden devices (\(hiddenPeers.count))" }
     var trustedDevices: [TrustedDevice] = []
     private var trustedReady = false
     var selectedPeerID: String?
@@ -589,7 +592,7 @@ final class AppModel {
                 syncPeerTrust()
             }
             if selectedPeerID == nil {
-                selectedPeerID = peers.first?.id
+                selectedPeerID = primaryPeers.first?.id
             }
         case "offer":
             guard let id = event.id else { return }

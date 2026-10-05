@@ -385,6 +385,7 @@ private struct FileChip: View {
 
 private struct NearbyCard: View {
     @Environment(AppModel.self) private var model
+    @State private var showHiddenDevices = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -404,8 +405,22 @@ private struct NearbyCard: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(model.peers) { peer in
+                        ForEach(model.primaryPeers) { peer in
                             PeerRow(peer: peer, selected: peer.id == model.selectedPeerID)
+                        }
+                        if !model.hiddenPeers.isEmpty {
+                            DisclosureGroup(isExpanded: $showHiddenDevices) {
+                                ForEach(model.hiddenPeers) { peer in
+                                    PeerRow(peer: peer, selected: peer.id == model.selectedPeerID)
+                                }
+                            } label: {
+                                Text(model.hiddenDevicesTitle)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .accessibilityIdentifier("HiddenDevices")
+                            .padding(.top, 8)
                         }
                     }
                 }

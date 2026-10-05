@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -20,7 +21,8 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         _model = App.Model;
         Root.DataContext = _model;
-        PeerList.ItemsSource = _model.Peers;
+        PeerList.ItemsSource = _model.PrimaryPeers;
+        HiddenList.ItemsSource = _model.HiddenPeers;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(DragRegion);
         WindowChrome.PrepareTitleBar(this);
@@ -81,7 +83,8 @@ public sealed partial class MainWindow : Window
     {
         if (e.PropertyName == nameof(AppModel.PeerStamp))
         {
-            PeerList.ItemsSource = _model.Peers;
+            PeerList.ItemsSource = _model.PrimaryPeers;
+            HiddenList.ItemsSource = _model.HiddenPeers;
             RestoreSelection();
         }
 
@@ -168,20 +171,31 @@ public sealed partial class MainWindow : Window
     void RestoreSelection()
     {
         _refreshingPeers = true;
-        Peer? match = null;
+        Peer? primary = null;
+        Peer? hidden = null;
         if (_model.SelectedPeerId != null)
         {
-            foreach (var peer in _model.Peers)
+            foreach (var peer in _model.PrimaryPeers)
             {
                 if (peer.Id == _model.SelectedPeerId)
                 {
-                    match = peer;
+                    primary = peer;
+                    break;
+                }
+            }
+
+            foreach (var peer in _model.HiddenPeers)
+            {
+                if (peer.Id == _model.SelectedPeerId)
+                {
+                    hidden = peer;
                     break;
                 }
             }
         }
 
-        PeerList.SelectedItem = match;
+        PeerList.SelectedItem = primary;
+        HiddenList.SelectedItem = hidden;
         _refreshingPeers = false;
     }
 
@@ -334,16 +348,96 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    void PeerList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    void PeerContainerChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (_refreshingPeers)
+        if (args.InRecycleQueue || args.ItemContainer is not ListViewItem item)
         {
             return;
         }
 
-        if (PeerList.SelectedItem is Peer peer)
+        item.ApplyTemplate();
+        HideSelectionBar(item);
+        item.Loaded -= PeerItem_Loaded;
+        item.Loaded += PeerItem_Loaded;
+    }
+
+    void PeerItem_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is ListViewItem item)
         {
-            _model.Select(peer);
+            HideSelectionBar(item);
+        }
+    }
+
+    static void HideSelectionBar(ListViewItem item)
+    {
+        if (FindPresenter(item) is not ListViewItemPresenter presenter)
+        {
+            return;
+        }
+
+        // The pill is drawn from these brushes. Turning the flag off alone
+        // leaves the one already created for the selected row.
+        presenter.SelectionIndicatorVisualEnabled = false;
+        presenter.SelectionIndicatorBrush = ClearIndicator();
+        presenter.SelectionIndicatorPointerOverBrush = ClearIndicator();
+        presenter.SelectionIndicatorPressedBrush = ClearIndicator();
+        presenter.SelectionIndicatorDisabledBrush = ClearIndicator();
+    }
+
+    static SolidColorBrush ClearIndicator() => new(Microsoft.UI.Colors.Transparent);
+
+    static ListViewItemPresenter? FindPresenter(DependencyObject node)
+    {
+        if (node is ListViewItemPresenter presenter)
+        {
+            return presenter;
+        }
+
+        var count = VisualTreeHelper.GetChildrenCount(node);
+        for (var i = 0; i < count; i++)
+        {
+            var found = FindPresenter(VisualTreeHelper.GetChild(node, i));
+            if (found != null)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    void PeerList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_refreshingPeers || PeerList.SelectedItem is not Peer peer)
+        {
+            return;
+        }
+
+        _refreshingPeers = true;
+        HiddenList.SelectedItem = null;
+        _refreshingPeers = false;
+        _model.Select(peer);
+        if (PeerList.ContainerFromItem(peer) is ListViewItem item)
+        {
+            HideSelectionBar(item);
+        }
+    }
+
+    void HiddenList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_refreshingPeers || HiddenList.SelectedItem is not Peer peer)
+        {
+            return;
+        }
+
+        _refreshingPeers = true;
+        PeerList.SelectedItem = null;
+        _refreshingPeers = false;
+        _model.Select(peer, true);
+        if (HiddenList.ContainerFromItem(peer) is ListViewItem item)
+        {
+            HideSelectionBar(item);
         }
     }
 

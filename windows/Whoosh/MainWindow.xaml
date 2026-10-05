@@ -230,9 +230,74 @@
 
             <Border Grid.Column="1" Style="{StaticResource Card}">
                 <Grid RowSpacing="8">
+                    <Grid.Resources>
+                        <Style x:Key="PeerItem" BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="4" />
+                        </Style>
+                        <DataTemplate x:Key="PeerTemplate">
+                            <Grid Padding="4,2" AutomationProperties.Name="{Binding Name}" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock FontWeight="Medium" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        FontFamily="Cascadia Mono, Consolas"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="{Binding Detail}"
+                                        TextTrimming="CharacterEllipsis"
+                                        Visibility="{Binding ShowDetail, Converter={StaticResource Vis}}" />
+                                    <TextBlock
+                                        AutomationProperties.AutomationId="WaitingForTrust"
+                                        AutomationProperties.Name="{Binding WaitingText}"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="{Binding WaitingText}"
+                                        TextTrimming="CharacterEllipsis"
+                                        ToolTipService.ToolTip="{Binding WaitingText}"
+                                        Visibility="{Binding ShowWaiting, Converter={StaticResource Vis}}" />
+                                </StackPanel>
+                                <Button
+                                    Grid.Column="1"
+                                    MinWidth="0"
+                                    Padding="10,4"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.AutomationId="AddTrusted"
+                                    AutomationProperties.Name="{Binding AddAccessLabel}"
+                                    Click="AddPeer_Click"
+                                    Content="Add"
+                                    Style="{StaticResource SubtleButtonStyle}"
+                                    Tag="{Binding}"
+                                    ToolTipService.ToolTip="Trust this device"
+                                    Visibility="{Binding ShowAdd, Converter={StaticResource Vis}}" />
+                                <Button
+                                    Grid.Column="2"
+                                    MinWidth="36"
+                                    Padding="8,4"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.AutomationId="CopyClipboard"
+                                    AutomationProperties.Name="{Binding ClipboardAccessLabel}"
+                                    Click="Clipboard_Click"
+                                    Tag="{Binding}"
+                                    ToolTipService.ToolTip="{Binding ClipboardTip}"
+                                    Visibility="{Binding ShowClipboard, Converter={StaticResource Vis}}">
+                                    <FontIcon FontSize="14" Glyph="&#xE8C8;" />
+                                </Button>
+                                <Border Grid.Column="3" Padding="8,3" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
+                                    <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding ProtocolLabel}" />
+                                </Border>
+                            </Grid>
+                        </DataTemplate>
+                    </Grid.Resources>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <Grid>
                         <TextBlock Style="{StaticResource SectionTitle}" Text="NEARBY" />
@@ -243,88 +308,51 @@
                             IsActive="{Binding ShowLooking}"
                             Visibility="{Binding ShowLooking, Converter={StaticResource Vis}}" />
                     </Grid>
-                    <TextBlock
-                        x:Name="NearbyStatus"
-                        Grid.Row="1"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        AutomationProperties.AutomationId="NearbyStatus"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="{Binding NearbyMessage}"
-                        Visibility="{Binding ShowNearbyMessage, Converter={StaticResource Vis}}" />
-                    <ListView
-                        x:Name="PeerList"
-                        Grid.Row="1"
-                        AutomationProperties.AutomationId="NearbyList"
-                        SelectionChanged="PeerList_SelectionChanged"
-                        SelectionMode="Single">
-                        <ListView.ItemContainerStyle>
-                            <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="Padding" Value="4" />
-                            </Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Padding="4,2" AutomationProperties.Name="{Binding Name}" ColumnSpacing="8">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <StackPanel>
-                                        <TextBlock FontWeight="Medium" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock
-                                            FontFamily="Cascadia Mono, Consolas"
-                                            FontSize="12"
-                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                            Text="{Binding Detail}"
-                                            TextTrimming="CharacterEllipsis"
-                                            Visibility="{Binding ShowDetail, Converter={StaticResource Vis}}" />
-                                        <TextBlock
-                                            AutomationProperties.AutomationId="WaitingForTrust"
-                                            AutomationProperties.Name="{Binding WaitingText}"
-                                            FontSize="12"
-                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                            Text="{Binding WaitingText}"
-                                            TextTrimming="CharacterEllipsis"
-                                            ToolTipService.ToolTip="{Binding WaitingText}"
-                                            Visibility="{Binding ShowWaiting, Converter={StaticResource Vis}}" />
-                                    </StackPanel>
-                                    <Button
-                                        Grid.Column="1"
-                                        MinWidth="0"
-                                        Padding="10,4"
-                                        VerticalAlignment="Center"
-                                        AutomationProperties.AutomationId="AddTrusted"
-                                        AutomationProperties.Name="{Binding AddAccessLabel}"
-                                        Click="AddPeer_Click"
-                                        Content="Add"
-                                        Style="{StaticResource SubtleButtonStyle}"
-                                        Tag="{Binding}"
-                                        ToolTipService.ToolTip="Trust this device"
-                                        Visibility="{Binding ShowAdd, Converter={StaticResource Vis}}" />
-                                    <Button
-                                        Grid.Column="2"
-                                        MinWidth="36"
-                                        Padding="8,4"
-                                        VerticalAlignment="Center"
-                                        AutomationProperties.AutomationId="CopyClipboard"
-                                        AutomationProperties.Name="{Binding ClipboardAccessLabel}"
-                                        Click="Clipboard_Click"
-                                        Tag="{Binding}"
-                                        ToolTipService.ToolTip="{Binding ClipboardTip}"
-                                        Visibility="{Binding ShowClipboard, Converter={StaticResource Vis}}">
-                                        <FontIcon FontSize="14" Glyph="&#xE8C8;" />
-                                    </Button>
-                                    <Border Grid.Column="3" Padding="8,3" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
-                                        <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding ProtocolLabel}" />
-                                    </Border>
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                    <Grid Grid.Row="1">
+                        <TextBlock
+                            x:Name="NearbyStatus"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="NearbyStatus"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="{Binding NearbyMessage}"
+                            Visibility="{Binding ShowNearbyMessage, Converter={StaticResource Vis}}" />
+                        <ListView
+                            x:Name="PeerList"
+                            AutomationProperties.AutomationId="NearbyList"
+                            ContainerContentChanging="PeerContainerChanging"
+                            ItemContainerStyle="{StaticResource PeerItem}"
+                            ItemTemplate="{StaticResource PeerTemplate}"
+                            SelectionChanged="PeerList_SelectionChanged"
+                            SelectionMode="Single"
+                            Visibility="{Binding ShowPeerList, Converter={StaticResource Vis}}" />
+                    </Grid>
+                    <Expander
+                        x:Name="HiddenDevices"
+                        Grid.Row="2"
+                        Padding="0"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        AutomationProperties.AutomationId="HiddenDevices"
+                        IsExpanded="False"
+                        Visibility="{Binding ShowHiddenDevices, Converter={StaticResource Vis}}">
+                        <Expander.Header>
+                            <TextBlock
+                                FontSize="12"
+                                FontWeight="SemiBold"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="{Binding HiddenDevicesTitle}" />
+                        </Expander.Header>
+                        <ListView
+                            x:Name="HiddenList"
+                            MaxHeight="220"
+                            AutomationProperties.AutomationId="HiddenList"
+                            ContainerContentChanging="PeerContainerChanging"
+                            ItemContainerStyle="{StaticResource PeerItem}"
+                            ItemTemplate="{StaticResource PeerTemplate}"
+                            SelectionChanged="HiddenList_SelectionChanged"
+                            SelectionMode="Single" />
+                    </Expander>
                 </Grid>
             </Border>
         </Grid>

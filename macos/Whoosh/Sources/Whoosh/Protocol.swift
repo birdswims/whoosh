@@ -237,3 +237,116 @@ func protocolLabel(_ via: String) -> String {
     default: "Device"
     }
 }
+
+/// One nearby row per computer. Whoosh wins when that computer runs it.
+/// Quick Share is next, then AirDrop. Matches `NearbyDevices` on Windows.
+enum PeerGrouping {
+    static func primary(in peers: [Peer]) -> [Peer] {
+        split(peers).primary
+    }
+
+    static func hidden(in peers: [Peer]) -> [Peer] {
+        split(peers).hidden
+    }
+
+    static func split(_ peers: [Peer]) -> (primary: [Peer], hidden: [Peer]) {
+        var parent = Array(peers.indices)
+        func find(_ index: Int) -> Int {
+            var index = index
+            while parent[index] != index {
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            }
+            return index
+        }
+        func union(_ left: Int, _ right: Int) {
+            let a = find(left)
+            let b = find(right)
+            if a != b {
+                parent[b] = a
+            }
+        }
+
+        var hosts: [String: Int] = [:]
+        var names: [String: Int] = [:]
+        for (index, peer) in peers.enumerated() {
+            if let host = hostKey(peer.address) {
+                if let other = hosts[host] {
+                    union(index, other)
+                } else {
+                    hosts[host] = index
+                }
+            }
+            let trimmed = peer.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard distinctive(trimmed) else { continue }
+            let key = trimmed.lowercased()
+            if let named = names[key] {
+                if peers[named].via.caseInsensitiveCompare(peer.via) != .orderedSame {
+                    union(index, named)
+                }
+            } else {
+                names[key] = index
+            }
+        }
+
+        var groups: [Int: [Int]] = [:]
+        for index in peers.indices {
+            groups[find(index), default: []].append(index)
+        }
+        var hiddenIndexes = Set<Int>()
+        for indexes in groups.values where indexes.count > 1 {
+            let best = indexes.min { prefer(peers[$0], peers[$1]) }!
+            for index in indexes where index != best {
+                hiddenIndexes.insert(index)
+            }
+        }
+        var primary: [Peer] = []
+        var hidden: [Peer] = []
+        for (index, peer) in peers.enumerated() {
+            if hiddenIndexes.contains(index) {
+                hidden.append(peer)
+            } else {
+                primary.append(peer)
+            }
+        }
+        return (primary, hidden)
+    }
+
+    private static func prefer(_ candidate: Peer, _ current: Peer) -> Bool {
+        let left = (rank(candidate.via), candidate.name.lowercased(), candidate.id)
+        let right = (rank(current.via), current.name.lowercased(), current.id)
+        return left < right
+    }
+
+    private static func rank(_ via: String) -> Int {
+        switch via {
+        case "whoosh": 0
+        case "quickshare": 1
+        case "airdrop": 2
+        default: 3
+        }
+    }
+
+    private static func distinctive(_ name: String) -> Bool {
+        if name.isEmpty { return false }
+        let generic = ["quick share device", "airdrop device", "device"]
+        return !generic.contains(name.lowercased())
+    }
+
+    private static func hostKey(_ address: String) -> String? {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("[") {
+            guard let end = trimmed.firstIndex(of: "]") else { return nil }
+            let inside = trimmed[trimmed.index(after: trimmed.startIndex)..<end]
+            let text = inside.lowercased()
+            if text.hasPrefix("::ffff:"), text.split(separator: ":").count > 2 {
+                return String(text.dropFirst(7))
+            }
+            return text.isEmpty ? nil : text
+        }
+        guard let colon = trimmed.lastIndex(of: ":"), colon > trimmed.startIndex else { return nil }
+        let host = trimmed[..<colon]
+        if host.isEmpty || host.contains(":") { return nil }
+        return String(host).lowercased()
+    }
+}

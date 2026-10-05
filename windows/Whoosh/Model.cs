@@ -280,8 +280,11 @@ public sealed class AppModel : Observable
     bool _appliedPrefs;
     int _nextId;
     string? _selectedPeerId;
+    string? _pinnedHiddenId;
 
     public ObservableCollection<Peer> Peers { get; } = [];
+    public ObservableCollection<Peer> PrimaryPeers { get; } = [];
+    public ObservableCollection<Peer> HiddenPeers { get; } = [];
     public ObservableCollection<TrustedDevice> TrustedDevices { get; } = [];
     public ObservableCollection<SendFile> Files { get; } = [];
     public ObservableCollection<ActivityItem> Activity { get; } = [];
@@ -328,6 +331,8 @@ public sealed class AppModel : Observable
     public bool ShowOutgoingPin => SelectedPeer?.Via == "whoosh";
     public bool ShowPin => RequirePin && !string.IsNullOrEmpty(Pin);
     public bool ShowPeerList => Peers.Count > 0;
+    public bool ShowHiddenDevices => HiddenPeers.Count > 0;
+    public string HiddenDevicesTitle => $"Hidden devices ({HiddenPeers.Count})";
     public bool ShowNearbyMessage => Peers.Count == 0;
     public bool ShowLooking => !SawPeers;
     public string NearbyMessage => SawPeers ? "No devices nearby" : "Looking…";
@@ -566,8 +571,11 @@ public sealed class AppModel : Observable
         Touch();
     }
 
-    public void Select(Peer peer)
+    public void Select(Peer peer) => Select(peer, false);
+
+    public void Select(Peer peer, bool fromHidden)
     {
+        _pinnedHiddenId = fromHidden ? peer.Id : null;
         if (_selectedPeerId == peer.Id)
         {
             Touch();
@@ -1118,6 +1126,7 @@ public sealed class AppModel : Observable
     void SetPeers(IReadOnlyList<Peer> incoming)
     {
         var selected = _selectedPeerId;
+        var pinned = _pinnedHiddenId;
         if (selected != null && !incoming.Any(peer => peer.Id == selected))
         {
             var previous = Peers.FirstOrDefault(peer => peer.Id == selected);
@@ -1145,6 +1154,10 @@ public sealed class AppModel : Observable
                 _selectedPeerId = match.Id;
                 _settings.SelectedPeer = match.Id;
                 WriteSettings();
+                if (pinned != null && pinned == selected)
+                {
+                    _pinnedHiddenId = match.Id;
+                }
             }
         }
 
@@ -1154,10 +1167,44 @@ public sealed class AppModel : Observable
             Peers.Add(peer);
         }
 
-        SawPeers = true;
-        if (_selectedPeerId == null && Peers.Count > 0)
+        var split = NearbyDevices.Split(Peers);
+        PrimaryPeers.Clear();
+        HiddenPeers.Clear();
+        foreach (var peer in split.Primary)
         {
-            _selectedPeerId = Peers[0].Id;
+            PrimaryPeers.Add(peer);
+        }
+
+        foreach (var peer in split.Hidden)
+        {
+            HiddenPeers.Add(peer);
+        }
+
+        SawPeers = true;
+        if (_selectedPeerId != null && _pinnedHiddenId != _selectedPeerId)
+        {
+            Peer? hiddenPeer = null;
+            foreach (var peer in split.Hidden)
+            {
+                if (peer.Id == _selectedPeerId)
+                {
+                    hiddenPeer = peer;
+                    break;
+                }
+            }
+
+            var preferred = hiddenPeer == null ? null : NearbyDevices.PreferredVisible(hiddenPeer, split.Primary);
+            if (preferred != null)
+            {
+                _selectedPeerId = preferred.Id;
+                _settings.SelectedPeer = preferred.Id;
+                WriteSettings();
+            }
+        }
+
+        if (_selectedPeerId == null && PrimaryPeers.Count > 0)
+        {
+            _selectedPeerId = PrimaryPeers[0].Id;
         }
 
         Raise(nameof(SawPeers));
@@ -1428,6 +1475,8 @@ public sealed class AppModel : Observable
         Raise(nameof(HasWarnings));
         Raise(nameof(WarningsText));
         Raise(nameof(ShowPeerList));
+        Raise(nameof(ShowHiddenDevices));
+        Raise(nameof(HiddenDevicesTitle));
         Raise(nameof(ShowNearbyMessage));
         Raise(nameof(NearbyMessage));
         Raise(nameof(ShowLooking));
