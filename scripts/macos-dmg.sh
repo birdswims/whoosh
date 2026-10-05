@@ -47,8 +47,20 @@ cp "$ROOT/target/release/whoosh" "$APP/Contents/MacOS/whoosh-core"
 chmod +x "$APP/Contents/MacOS/Whoosh" "$APP/Contents/MacOS/whoosh-core"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+SHARE="$APP/Contents/PlugIns/WhooshShare.appex"
+mkdir -p "$SHARE/Contents/MacOS" "$SHARE/Contents/Resources"
+cp "$ROOT/macos/Whoosh/Share/Info.plist" "$SHARE/Contents/Info.plist"
+cp "$BIN_DIR/WhooshShare" "$SHARE/Contents/MacOS/WhooshShare"
+cp "$ART/AppIcon.icns" "$SHARE/Contents/Resources/AppIcon.icns"
+chmod +x "$SHARE/Contents/MacOS/WhooshShare"
+
+codesign --force --sign - \
+  --entitlements "$ROOT/macos/Whoosh/Share/WhooshShare.entitlements" \
+  --identifier com.whoosh.macos.share \
+  "$SHARE"
 codesign --force --sign - --identifier com.whoosh.macos.core "$APP/Contents/MacOS/whoosh-core"
 codesign --force --sign - --identifier com.whoosh.macos "$APP"
+codesign --verify --strict "$SHARE"
 codesign --verify --strict "$APP"
 
 echo "Packing the disk image"

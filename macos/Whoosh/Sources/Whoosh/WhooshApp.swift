@@ -68,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             Snapshot.writeIfRequested()
         }
+        DispatchQueue.global(qos: .utility).async {
+            registerShareExtension()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -85,7 +88,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         DispatchQueue.main.async {
-            AppModel.shared?.addURLs(urls)
+            AppModel.accept(urls)
         }
     }
+}
+
+/// Puts Whoosh in the system Share menu. New extensions are registered but
+/// not offered until they are enabled.
+private func registerShareExtension() {
+    guard let plugins = Bundle.main.builtInPlugInsURL else { return }
+    let appex = plugins.appendingPathComponent("WhooshShare.appex")
+    guard FileManager.default.fileExists(atPath: appex.path) else { return }
+    let pluginkit = URL(fileURLWithPath: "/usr/bin/pluginkit")
+    run(pluginkit, ["-a", appex.path])
+    run(pluginkit, ["-e", "use", "-i", "com.whoosh.macos.share"])
+}
+
+private func run(_ executable: URL, _ arguments: [String]) {
+    let process = Process()
+    process.executableURL = executable
+    process.arguments = arguments
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try? process.run()
+    process.waitUntilExit()
 }

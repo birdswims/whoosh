@@ -48,6 +48,7 @@ static class Installer
             CreateShortcut(destination);
             RegisterUninstall(destination);
             TryFirewall(destination);
+            TryShare(destination);
             progress?.Report("Installed.");
             return destination;
         }
@@ -170,6 +171,25 @@ static class Installer
         }
 
         key.SetValue("EstimatedSize", (int)Math.Min(int.MaxValue, bytes / 1024), RegistryValueKind.DWord);
+    }
+
+    static void TryShare(string directory)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = Path.Combine(directory, "Whoosh.exe"),
+                Arguments = "--register-share",
+                WorkingDirectory = directory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            })?.WaitForExit(60000);
+        }
+        catch
+        {
+            // The app registers again the next time it opens.
+        }
     }
 
     static void TryFirewall(string directory)

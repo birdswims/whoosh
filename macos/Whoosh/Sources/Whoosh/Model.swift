@@ -12,6 +12,7 @@ enum AppScreen {
 @Observable
 final class AppModel {
     static weak var shared: AppModel?
+    private static var pendingURLs: [URL] = []
 
     private let engine = Engine()
     private let airDropSender = AirDropSender()
@@ -100,6 +101,37 @@ final class AppModel {
     init() {
         Self.shared = self
         selectedPeerID = UserDefaults.standard.string(forKey: Pref.selected)
+        if !Self.pendingURLs.isEmpty {
+            let queued = Self.pendingURLs
+            Self.pendingURLs.removeAll()
+            addURLs(queued)
+        }
+    }
+
+    /// Files opened while the window model does not exist yet, including a share.
+    static func accept(_ urls: [URL]) {
+        let files = urls.flatMap(shareFiles)
+        guard !files.isEmpty else { return }
+        if let shared {
+            shared.addURLs(files)
+            return
+        }
+        pendingURLs.append(contentsOf: files)
+    }
+
+    /// whoosh://add?manifest= points at a file list written by the share extension.
+    private static func shareFiles(_ url: URL) -> [URL] {
+        guard url.scheme?.lowercased() == "whoosh" else { return [url] }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let manifest = components.queryItems?.first(where: { $0.name == "manifest" })?.value,
+              let text = try? String(contentsOfFile: manifest, encoding: .utf8) else {
+            return []
+        }
+        return text.split(whereSeparator: \.isNewline).compactMap { line in
+            let path = String(line)
+            guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path)
+        }
     }
 
     func start() {

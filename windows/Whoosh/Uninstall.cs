@@ -21,6 +21,15 @@ internal static class Uninstall
 
         try
         {
+            ShareIdentity.Unregister();
+        }
+        catch
+        {
+            // The Share entry disappears with the package, or on the next sign-in.
+        }
+
+        try
+        {
             var link = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Whoosh.lnk");
             if (File.Exists(link))
             {

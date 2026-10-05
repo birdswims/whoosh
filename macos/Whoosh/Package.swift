@@ -5,7 +5,8 @@ let package = Package(
     name: "Whoosh",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "Whoosh", targets: ["Whoosh"])
+        .executable(name: "Whoosh", targets: ["Whoosh"]),
+        .executable(name: "WhooshShare", targets: ["WhooshShare"]),
     ],
     targets: [
         .target(name: "WhooshUI", path: "Sources/WhooshUI"),
@@ -20,6 +21,13 @@ let package = Package(
             name: "RenderIcon",
             dependencies: ["WhooshUI"],
             path: "Sources/RenderIcon"
+        ),
+        .executableTarget(
+            name: "WhooshShare",
+            path: "Sources/WhooshShare",
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-e", "-Xlinker", "_NSExtensionMain"]),
+            ]
         ),
     ]
 )

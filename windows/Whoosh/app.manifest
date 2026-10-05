@@ -13,4 +13,8 @@
       <maxVersionTested xmlns="http://schemas.microsoft.com/SMI/2021/WindowsSettings">10.0.26100.0</maxVersionTested>
     </windowsSettings>
   </application>
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1"
+        publisher="CN=Whoosh"
+        packageName="Whoosh.Desktop"
+        applicationId="Whoosh" />
 </assembly>
