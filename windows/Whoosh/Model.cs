@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
@@ -306,6 +307,7 @@ public sealed class AppModel : Observable
     public Peer? TrustPeer { get; private set; }
     public bool TrustForClipboard { get; private set; }
     public string Banner { get; private set; } = "";
+    public InfoBarSeverity BannerSeverity { get; private set; } = InfoBarSeverity.Error;
     public bool EngineDown { get; private set; }
     public string EngineError { get; private set; } = "";
     public bool Sending { get; private set; }
@@ -699,7 +701,7 @@ public sealed class AppModel : Observable
         var package = new DataPackage();
         package.SetText(Fingerprint);
         Clipboard.SetContent(package);
-        ShowBanner("Fingerprint copied.");
+        ShowBanner("Fingerprint copied.", InfoBarSeverity.Success);
     }
 
     public void RefreshTrusted()
@@ -780,7 +782,7 @@ public sealed class AppModel : Observable
             Trust = trust,
             PeerName = peer.Name,
         });
-        ShowBanner($"Copying from {peer.Name}…");
+        ShowBanner($"Copying from {peer.Name}…", InfoBarSeverity.Informational);
     }
 
     void ApplyRemoteClipboard(WireEvent ev)
@@ -807,7 +809,7 @@ public sealed class AppModel : Observable
 
         if (text.Length == 0 && (png == null || png.Length == 0))
         {
-            ShowBanner($"{ev.Peer ?? "That device"} has nothing on the clipboard.");
+            ShowBanner($"{ev.Peer ?? "That device"} has nothing on the clipboard.", InfoBarSeverity.Informational);
             return;
         }
 
@@ -817,7 +819,7 @@ public sealed class AppModel : Observable
             ? $"Copied text and an image from {name}."
             : png is { Length: > 0 }
                 ? $"Copied an image from {name}."
-                : $"Copied from {name}.");
+                : $"Copied from {name}.", InfoBarSeverity.Success);
     }
 
     void BeginSend(Peer peer, bool trust)
@@ -1357,8 +1359,10 @@ public sealed class AppModel : Observable
         Touch();
     }
 
-    void ShowBanner(string text)
+    void ShowBanner(string text, InfoBarSeverity severity = InfoBarSeverity.Error)
     {
+        BannerSeverity = severity;
+        Raise(nameof(BannerSeverity));
         Banner = text;
         Raise(nameof(Banner));
         Touch();

@@ -86,7 +86,7 @@
             IsClosable="True"
             IsOpen="{Binding HasBanner, Mode=OneWay}"
             Message="{Binding Banner}"
-            Severity="Error"
+            Severity="{Binding BannerSeverity, Mode=OneWay}"
             Closed="Banner_Closed" />
 
         <StackPanel Grid.Row="2" Spacing="8">
