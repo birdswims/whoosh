@@ -13,14 +13,69 @@ use tokio::time::timeout;
 use crate::approve::{approve_all, Approval, IncomingFile, TransferOffer};
 use crate::error::{self, Error, Result};
 use crate::mime::{kind_of_mime, sniff};
-use crate::native::codec::{self, Control, FileOffer, Hello, Offer, MAGIC};
-use crate::native::tls::{self, client_config, server_config, IdentityCert, Trust};
+use crate::native::codec::{self, Clipboard, Control, FileOffer, Hello, Offer, MAGIC};
+use crate::native::tls::{
+    self, client_config, client_config_with_identity, server_config, IdentityCert, Trust,
+};
 use crate::paths::{destination, partial_path};
 use crate::progress::{ByteMeter, PeerProgressHook, ProgressHook};
 use crate::sanitize::safe_file_name;
 
 const BUF: usize = 1024 * 1024;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
+const CLIPBOARD_DENIED: &str = "not a trusted device";
+
+/// Decides whether a presented device certificate may read the clipboard.
+pub type DeviceAllow = Arc<dyn Fn(&[u8; 32]) -> bool + Send + Sync>;
+
+/// Latest clipboard snapshot held in memory. It is never written to disk.
+#[derive(Clone, Default)]
+pub struct ClipboardStore {
+    inner: Arc<std::sync::Mutex<ClipboardItem>>,
+}
+
+/// What a trusted device can paste.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClipboardItem {
+    pub text: String,
+    pub image_png: Vec<u8>,
+}
+
+impl ClipboardStore {
+    pub fn publish(&self, text: String, image_png: Vec<u8>) -> Result<()> {
+        if text.len() > codec::MAX_CLIPBOARD_TEXT {
+            return Err(Error::protocol("clipboard text is too long"));
+        }
+        if image_png.len() > codec::MAX_CLIPBOARD_IMAGE {
+            return Err(Error::protocol("clipboard image is too large"));
+        }
+        if !image_png.is_empty() && !image_png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(Error::protocol("clipboard image is not a png"));
+        }
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = ClipboardItem { text, image_png };
+        Ok(())
+    }
+
+    fn get(&self) -> ClipboardItem {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+}
+
+fn allow_none() -> DeviceAllow {
+    Arc::new(|_| false)
+}
+
+#[derive(Debug)]
+pub enum SessionResult {
+    Files(ReceiveReport),
+    Clipboard,
+}
 
 #[derive(Clone)]
 pub struct ReceiveOptions {
@@ -31,6 +86,9 @@ pub struct ReceiveOptions {
     /// Called with the sender's name as file bytes arrive. Empty for callers that
     /// only need the finished report.
     pub on_progress: Option<PeerProgressHook>,
+    pub clipboard: ClipboardStore,
+    /// Fingerprints allowed to pull the clipboard. File transfers do not use this.
+    pub allow_device: DeviceAllow,
 }
 
 impl ReceiveOptions {
@@ -41,6 +99,8 @@ impl ReceiveOptions {
             max_file_bytes: 32 * 1024 * 1024 * 1024,
             approve: approve_all(),
             on_progress: None,
+            clipboard: ClipboardStore::default(),
+            allow_device: allow_none(),
         }
     }
 }
@@ -101,7 +161,7 @@ impl NativeListener {
         self.pin.as_deref()
     }
 
-    pub async fn receive_one(&self, options: ReceiveOptions) -> Result<ReceiveReport> {
+    pub async fn receive_one(&self, options: ReceiveOptions) -> Result<SessionResult> {
         let incoming = self.endpoint.accept().await.ok_or(Error::Closed)?;
         let connection = incoming
             .await
@@ -115,6 +175,25 @@ impl NativeListener {
         )
         .await
     }
+}
+
+pub async fn pull_clipboard(
+    addr: SocketAddr,
+    name: &str,
+    trust: Trust,
+    identity: &IdentityCert,
+) -> Result<ClipboardItem> {
+    let crypto = client_config_with_identity(trust, Some(identity))?;
+    let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
+    endpoint.set_default_client_config(crypto.config);
+    let connection = endpoint
+        .connect(addr, tls::SERVER_NAME)
+        .map_err(|error| Error::protocol(error.to_string()))?
+        .await
+        .map_err(|error| Error::protocol(error.to_string()))?;
+    let item = request_clipboard(connection, name).await?;
+    endpoint.wait_idle().await;
+    Ok(item)
 }
 
 pub async fn send_files(
@@ -272,7 +351,7 @@ async fn handle_receive(
     device_id: [u8; 16],
     pin: Option<&str>,
     options: ReceiveOptions,
-) -> Result<ReceiveReport> {
+) -> Result<SessionResult> {
     let (mut send, mut recv) = connection
         .accept_bi()
         .await
@@ -296,6 +375,10 @@ async fn handle_receive(
     )
     .await?;
     let offer = match read_control(&mut recv).await? {
+        Control::ClipboardPull { request_id } => {
+            serve_clipboard(&connection, &mut send, request_id, &options).await?;
+            return Ok(SessionResult::Clipboard);
+        }
         Control::Offer(offer) => offer,
         _ => return Err(Error::protocol("expected offer")),
     };
@@ -436,11 +519,94 @@ async fn handle_receive(
     .await?;
     finish_peer(&mut send, &connection).await;
     tracing::info!(peer = %peer.name, files = files.len(), bytes, "native transfer complete");
-    Ok(ReceiveReport {
+    Ok(SessionResult::Files(ReceiveReport {
         peer: peer.name,
         files,
         bytes,
-    })
+    }))
+}
+
+async fn request_clipboard(connection: quinn::Connection, name: &str) -> Result<ClipboardItem> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|error| Error::protocol(error.to_string()))?;
+    AsyncWriteExt::write_all(&mut send, MAGIC).await?;
+    let mut device_id = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut device_id);
+    write_control(
+        &mut send,
+        &Control::Hello(Hello {
+            name: name.to_string(),
+            device_id,
+            pin_required: false,
+        }),
+    )
+    .await?;
+    match read_control(&mut recv).await? {
+        Control::Hello(_) => {}
+        _ => return Err(Error::protocol("expected hello")),
+    }
+    let mut request_id = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut request_id);
+    write_control(
+        &mut send,
+        &Control::ClipboardPull { request_id },
+    )
+    .await?;
+    let item = match read_control(&mut recv).await? {
+        Control::Clipboard(clipboard) if clipboard.request_id == request_id => ClipboardItem {
+            text: clipboard.text,
+            image_png: clipboard.image_png,
+        },
+        Control::Reject { reason, .. } => return Err(Error::Rejected(reason)),
+        _ => return Err(Error::protocol("expected clipboard")),
+    };
+    let _ = send.finish();
+    connection.close(0u32.into(), b"clipboard");
+    Ok(item)
+}
+
+async fn serve_clipboard(
+    connection: &quinn::Connection,
+    send: &mut quinn::SendStream,
+    request_id: [u8; 16],
+    options: &ReceiveOptions,
+) -> Result<()> {
+    // Anonymous LAN peers can open a QUIC connection. The clipboard leaves only
+    // when the client certificate is one this computer has already trusted.
+    let allowed = client_fingerprint(connection).is_some_and(|fingerprint| (options.allow_device)(&fingerprint));
+    if !allowed {
+        write_control(
+            send,
+            &Control::Reject {
+                transfer_id: request_id,
+                reason: CLIPBOARD_DENIED.into(),
+            },
+        )
+        .await?;
+        finish_peer(send, connection).await;
+        return Ok(());
+    }
+    let item = options.clipboard.get();
+    write_control(
+        send,
+        &Control::Clipboard(Clipboard {
+            request_id,
+            text: item.text,
+            image_png: item.image_png,
+        }),
+    )
+    .await?;
+    finish_peer(send, connection).await;
+    Ok(())
+}
+
+fn client_fingerprint(connection: &quinn::Connection) -> Option<[u8; 32]> {
+    let identity = connection.peer_identity()?;
+    let chain = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    let cert = chain.first()?;
+    Some(tls::fingerprint(cert.as_ref()))
 }
 
 async fn send_file(
@@ -605,7 +771,7 @@ where
     let mut len_buf = [0u8; 4];
     error::read_exact(recv, &mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > 1024 * 1024 {
+    if len == 0 || len > codec::MAX_CONTROL_FRAME {
         return Err(Error::protocol("invalid control frame"));
     }
     let mut body = vec![0u8; len];
@@ -639,9 +805,9 @@ fn constant_eq(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{send_files, NativeListener, ReceiveOptions};
+    use super::{pull_clipboard, send_files, ClipboardStore, NativeListener, ReceiveOptions};
     use crate::approve::{approval, approve_all};
-    use crate::native::tls::Trust;
+    use crate::native::tls::{generate_identity, Trust};
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
@@ -678,6 +844,8 @@ mod tests {
                 approval(|_| async { false })
             },
             on_progress: None,
+            clipboard: ClipboardStore::default(),
+            allow_device: super::allow_none(),
         };
         let receive = tokio::spawn(async move { listener.receive_one(options).await });
         let send = send_files(addr, "sender", &paths, pin, Trust::Roots(cert)).await;
@@ -691,7 +859,9 @@ mod tests {
         }
         let report = send.unwrap();
         assert_eq!(report.files, files.len());
-        let got = receive.await.unwrap().unwrap();
+        let super::SessionResult::Files(got) = receive.await.unwrap().unwrap() else {
+            panic!("expected a file transfer");
+        };
         assert_eq!(got.files.len(), files.len());
         assert_eq!(report.fingerprint, [0u8; 32]); // roots path does not capture the peer cert
         let _ = expected_fp;
@@ -827,5 +997,46 @@ mod tests {
             "{values:?}"
         );
         assert_eq!(*values.last().unwrap(), total);
+    }
+
+    #[tokio::test]
+    async fn clipboard_is_only_for_a_trusted_device() {
+        let listener =
+            NativeListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), "receiver", None).unwrap();
+        let addr = listener.local_addr;
+        let server_fp = listener.fingerprint;
+        let mine = generate_identity().unwrap();
+        let stranger = generate_identity().unwrap();
+        let allowed = mine.fingerprint;
+        let store = ClipboardStore::default();
+        let png = b"\x89PNG\r\n\x1a\nclipboard".to_vec();
+        store.publish("secret note".into(), png.clone()).unwrap();
+        let mut options = ReceiveOptions::auto(tempfile::tempdir().unwrap().keep());
+        options.clipboard = store;
+        options.allow_device = std::sync::Arc::new(move |fingerprint| fingerprint == &allowed);
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let _ = listener.receive_one(options.clone()).await;
+            }
+        });
+
+        let denied = pull_clipboard(
+            addr,
+            "stranger",
+            Trust::Fingerprint(Some(server_fp)),
+            &stranger,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            denied.to_string().contains("not a trusted device"),
+            "{denied}"
+        );
+
+        let copied = pull_clipboard(addr, "mine", Trust::Fingerprint(Some(server_fp)), &mine)
+            .await
+            .unwrap();
+        assert_eq!(copied.text, "secret note");
+        assert_eq!(copied.image_png, png);
     }
 }

@@ -60,6 +60,12 @@ public sealed class Command
 
     [JsonPropertyName("peer_name")]
     public string? PeerName { get; set; }
+
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
+
+    [JsonPropertyName("image_png")]
+    public string? ImagePng { get; set; }
 }
 
 public sealed class Peer
@@ -86,6 +92,16 @@ public sealed class Peer
     public bool Trusted { get; set; }
 
     public string ProtocolLabel => Format.Protocol(Via);
+
+    public bool ShowClipboard => Via == "whoosh";
+
+    public string ClipboardTip => Trusted
+        ? "Copy the clipboard from this device"
+        : "Trust this device to copy its clipboard";
+
+    public string ClipboardAccessLabel => Trusted
+        ? $"Copy clipboard from {Name}"
+        : $"Trust {Name} to copy its clipboard";
 }
 
 public sealed class OfferFile
@@ -198,6 +214,12 @@ public sealed class WireEvent
 
     [JsonPropertyName("paths")]
     public List<string>? Paths { get; set; }
+
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
+
+    [JsonPropertyName("image_png")]
+    public string? ImagePng { get; set; }
 }
 
 public sealed class Offer

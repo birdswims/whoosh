@@ -22,6 +22,8 @@ struct Command: Encodable {
     var accept: Bool?
     var offer: String?
     var peerName: String?
+    var text: String? = nil
+    var imagePng: String? = nil
 }
 
 struct Peer: Identifiable, Decodable, Hashable {
@@ -77,6 +79,24 @@ struct WireEvent: Decodable {
     var bytes: UInt64?
     var total: UInt64? = nil
     var paths: [String]?
+    var text: String? = nil
+    var imagePng: String? = nil
+}
+
+extension Peer {
+    var showsClipboard: Bool { via == "whoosh" }
+
+    var clipboardTip: String {
+        trusted
+            ? "Copy the clipboard from this device"
+            : "Trust this device to copy its clipboard"
+    }
+
+    var clipboardAccessLabel: String {
+        trusted
+            ? "Copy clipboard from \(name)"
+            : "Trust \(name) to copy its clipboard"
+    }
 }
 
 struct Offer: Identifiable, Equatable {

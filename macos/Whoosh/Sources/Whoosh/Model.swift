@@ -17,6 +17,11 @@ final class AppModel {
     private var offerQueue: [Offer] = []
     private var bannerToken = 0
     private var thumbnailLoads: Set<String> = []
+    private var pasteboardTimer: Timer?
+    private var pasteboardChange = NSPasteboard.general.changeCount
+    private var suppressPasteboardChange: Int?
+    private let maxClipboardText = 1024 * 1024
+    private let maxClipboardImage = 8 * 1024 * 1024
     private let thumbnailQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "whoosh.thumbnails"
@@ -56,6 +61,7 @@ final class AppModel {
     }
     var currentOffer: Offer?
     var trustPeer: Peer?
+    var trustForClipboard = false
     var banner: String?
     var engineDown = false
     var engineError = ""
@@ -98,6 +104,7 @@ final class AppModel {
         engineDown = false
         appliedPrefs = false
         engine.start()
+        watchPasteboard()
     }
 
     func retry() {
@@ -110,6 +117,8 @@ final class AppModel {
     func shutdown() {
         guard !didShutdown else { return }
         didShutdown = true
+        pasteboardTimer?.invalidate()
+        pasteboardTimer = nil
         airDropSender.cancel()
         engine.stopAndWait()
     }
@@ -230,19 +239,41 @@ final class AppModel {
     func send() {
         guard !sending, let peer = selectedPeer, !files.isEmpty else { return }
         if peer.via == "whoosh", !peer.trusted {
+            trustForClipboard = false
             trustPeer = peer
             return
         }
         beginSend(peer, trust: peer.via == "whoosh")
     }
 
+    func copyFrom(_ peer: Peer) {
+        guard peer.via == "whoosh", !engineDown else { return }
+        guard let fingerprint = peer.fingerprint, !fingerprint.isEmpty else {
+            showBanner("That device did not share a fingerprint.")
+            return
+        }
+        if !peer.trusted {
+            trustForClipboard = true
+            trustPeer = peer
+            return
+        }
+        pullClipboard(peer, trust: false)
+    }
+
     func confirmTrust() {
         guard let peer = trustPeer else { return }
+        let clipboard = trustForClipboard
+        trustForClipboard = false
         trustPeer = nil
+        if clipboard {
+            pullClipboard(peer, trust: true)
+            return
+        }
         beginSend(peer, trust: true)
     }
 
     func cancelTrust() {
+        trustForClipboard = false
         trustPeer = nil
     }
 
@@ -318,6 +349,104 @@ final class AppModel {
         }
     }
 
+    private func watchPasteboard() {
+        if pasteboardTimer == nil {
+            pasteboardChange = NSPasteboard.general.changeCount
+            let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+                self?.pollPasteboard()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            pasteboardTimer = timer
+        }
+        publishPasteboard()
+    }
+
+    private func pollPasteboard() {
+        let count = NSPasteboard.general.changeCount
+        guard count != pasteboardChange else { return }
+        pasteboardChange = count
+        if count == suppressPasteboardChange { return }
+        publishPasteboard()
+    }
+
+    private func publishPasteboard() {
+        let board = NSPasteboard.general
+        var text = board.string(forType: .string) ?? ""
+        let textTooBig = text.utf8.count > maxClipboardText
+        if textTooBig {
+            text = ""
+        }
+        var png = board.data(forType: .png)
+        if png == nil, let tiff = board.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
+            png = rep.representation(using: .png, properties: [:])
+        }
+        var imageTooBig = false
+        if let data = png, data.count > maxClipboardImage {
+            png = nil
+            imageTooBig = true
+        }
+        if text.isEmpty, png == nil, textTooBig || imageTooBig {
+            return
+        }
+        engine.send(Command(
+            id: nextID(),
+            op: "clipboard",
+            text: text,
+            imagePng: png?.base64EncodedString()
+        ))
+    }
+
+    private func pullClipboard(_ peer: Peer, trust: Bool) {
+        engine.send(Command(
+            id: nextID(),
+            op: "clipboard-pull",
+            target: peer.address,
+            trust: trust,
+            fingerprint: peer.fingerprint,
+            peerName: peer.name
+        ))
+        showBanner("Copying from \(peer.name)…")
+    }
+
+    private func applyRemoteClipboard(_ event: WireEvent) {
+        if event.ok == false {
+            let message = event.error ?? ""
+            showBanner(message.isEmpty ? "Couldn't copy that clipboard." : message)
+            return
+        }
+        let text = event.text ?? ""
+        let png = event.imagePng.flatMap { encoded -> Data? in
+            encoded.isEmpty ? nil : Data(base64Encoded: encoded)
+        }
+        if text.isEmpty, png == nil || png?.isEmpty == true {
+            let name = event.peer?.isEmpty == false ? event.peer! : "That device"
+            showBanner("\(name) has nothing on the clipboard.")
+            return
+        }
+        let board = NSPasteboard.general
+        var types: [NSPasteboard.PasteboardType] = []
+        if !text.isEmpty { types.append(.string) }
+        if let png, !png.isEmpty { types.append(.png) }
+        board.declareTypes(types, owner: nil)
+        if !text.isEmpty {
+            board.setString(text, forType: .string)
+        }
+        if let png, !png.isEmpty {
+            board.setData(png, forType: .png)
+        }
+        let count = board.changeCount
+        suppressPasteboardChange = count
+        pasteboardChange = count
+        let name = event.peer?.isEmpty == false ? event.peer! : "that device"
+        if !text.isEmpty, png?.isEmpty == false {
+            showBanner("Copied text and an image from \(name).")
+        } else if png?.isEmpty == false {
+            showBanner("Copied an image from \(name).")
+        } else {
+            showBanner("Copied from \(name).")
+        }
+    }
+
     private func performSend(_ peer: Peer, trust: Bool) {
         let pin = outgoingPin.trimmingCharacters(in: .whitespacesAndNewlines)
         engine.send(Command(
@@ -361,6 +490,8 @@ final class AppModel {
                 sending = false
                 showBanner(error)
             }
+        case "clipboard":
+            applyRemoteClipboard(event)
         case "peers":
             sawPeers = true
             let incoming = event.peers ?? []

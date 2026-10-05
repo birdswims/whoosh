@@ -40,6 +40,36 @@ pub fn remembered(addr: &SocketAddr) -> Option<[u8; 32]> {
     remembered_at(&peers_path().ok()?, addr)
 }
 
+/// True when this certificate was trusted from any address.
+///
+/// Clipboard access uses the fingerprint, not the current IP and port, so a
+/// device stays yours after it picks a new port.
+pub fn fingerprint_is_trusted(fingerprint: &[u8; 32]) -> bool {
+    peers_path()
+        .ok()
+        .is_some_and(|path| fingerprint_is_trusted_at(&path, fingerprint))
+}
+
+pub fn fingerprint_is_trusted_at(path: &Path, fingerprint: &[u8; 32]) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .and_then(parse_fingerprint)
+            .is_some_and(|saved| same_fingerprint(&saved, fingerprint))
+    })
+}
+
+fn same_fingerprint(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 pub fn remembered_at(path: &Path, addr: &SocketAddr) -> Option<[u8; 32]> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines() {
@@ -85,7 +115,7 @@ pub fn parse_fingerprint(text: &str) -> Option<[u8; 32]> {
 mod tests {
     use std::net::SocketAddr;
 
-    use super::{remember_at, remembered_at};
+    use super::{fingerprint_is_trusted_at, remember_at, remembered_at};
 
     #[test]
     fn replaces_a_saved_fingerprint() {
@@ -101,5 +131,7 @@ mod tests {
         assert_eq!(remembered_at(&path, &addr), Some(second));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 1);
+        assert!(fingerprint_is_trusted_at(&path, &second));
+        assert!(!fingerprint_is_trusted_at(&path, &first));
     }
 }

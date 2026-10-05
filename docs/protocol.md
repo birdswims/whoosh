@@ -16,8 +16,12 @@ The server writes length-prefixed control messages on that stream and does not r
 | 3 | Accept | 16-byte transfer id |
 | 4 | Reject | 16-byte transfer id, `u16` reason length, UTF-8 reason |
 | 5 | Done | 16-byte transfer id |
+| 6 | ClipboardPull | 16-byte request id |
+| 7 | Clipboard | 16-byte request id, `u32` text length, UTF-8 text, `u32` PNG length, PNG bytes |
 
-Each offered file is `u32` id, `u64` size, `u16` name length, name, `u16` MIME length, MIME. Strings are UTF-8 and the length prefixes are little-endian.
+ClipboardPull asks for the receiver's current clipboard instead of offering files. The receiver answers with Clipboard, or Reject with the reason `not a trusted device`, when the client certificate's SHA-256 fingerprint is not one it has saved. Text is at most 1 MiB. A non-empty image is a PNG of at most 8 MiB and must begin with the PNG signature. The receiver keeps that snapshot in memory and does not write it to disk. File sends still use Offer and do not present a client certificate. A clipboard pull presents the caller's device certificate. The receiver accepts it only when that fingerprint is already in `known-peers`, from any earlier address. The caller also pins the receiver's fingerprint. Both computers have to trust each other.
+
+Each offered file is `u32` id, `u64` size, `u16` name length, name, `u16` MIME length, MIME. Strings are UTF-8 and the length prefixes are little-endian. File-offer strings use a `u16` length. Clipboard text and PNG bytes use a `u32` length.
 
 After Accept, the client opens one unidirectional stream per file:
 

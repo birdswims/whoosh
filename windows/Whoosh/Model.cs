@@ -303,6 +303,7 @@ public sealed class AppModel : Observable
     public string OutgoingPin { get; set; } = "";
     public Offer? CurrentOffer { get; private set; }
     public Peer? TrustPeer { get; private set; }
+    public bool TrustForClipboard { get; private set; }
     public string Banner { get; private set; } = "";
     public bool EngineDown { get; private set; }
     public string EngineError { get; private set; } = "";
@@ -413,6 +414,10 @@ public sealed class AppModel : Observable
         _appliedPrefs = false;
         Raise(nameof(EngineDown));
         _engine.Start();
+        if (_queue != null)
+        {
+            ClipboardSync.Watch(_queue, PublishClipboard);
+        }
     }
 
     public void Retry()
@@ -581,13 +586,41 @@ public sealed class AppModel : Observable
 
         if (peer.Via == "whoosh" && !peer.Trusted)
         {
+            TrustForClipboard = false;
             TrustPeer = peer;
             Raise(nameof(TrustPeer));
+            Raise(nameof(TrustForClipboard));
             Touch();
             return;
         }
 
         BeginSend(peer, peer.Via == "whoosh");
+    }
+
+    public void CopyFromPeer(Peer peer)
+    {
+        if (peer.Via != "whoosh" || EngineDown)
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(peer.Fingerprint))
+        {
+            ShowBanner("That device did not share a fingerprint.");
+            return;
+        }
+
+        if (!peer.Trusted)
+        {
+            TrustForClipboard = true;
+            TrustPeer = peer;
+            Raise(nameof(TrustForClipboard));
+            Raise(nameof(TrustPeer));
+            Touch();
+            return;
+        }
+
+        PullClipboard(peer, trust: false);
     }
 
     public void ConfirmTrust()
@@ -597,14 +630,25 @@ public sealed class AppModel : Observable
             return;
         }
 
+        var clipboard = TrustForClipboard;
+        TrustForClipboard = false;
         TrustPeer = null;
+        Raise(nameof(TrustForClipboard));
         Raise(nameof(TrustPeer));
+        if (clipboard)
+        {
+            PullClipboard(peer, trust: true);
+            return;
+        }
+
         BeginSend(peer, trust: true);
     }
 
     public void CancelTrust()
     {
+        TrustForClipboard = false;
         TrustPeer = null;
+        Raise(nameof(TrustForClipboard));
         Raise(nameof(TrustPeer));
         Touch();
     }
@@ -660,6 +704,68 @@ public sealed class AppModel : Observable
         Banner = "";
         Raise(nameof(Banner));
         Touch();
+    }
+
+    void PublishClipboard(string text, byte[]? png)
+    {
+        _engine.Send(new Command
+        {
+            Id = NextId(),
+            Op = "clipboard",
+            Text = text,
+            ImagePng = png == null || png.Length == 0 ? null : Convert.ToBase64String(png),
+        });
+    }
+
+    void PullClipboard(Peer peer, bool trust)
+    {
+        _engine.Send(new Command
+        {
+            Id = NextId(),
+            Op = "clipboard-pull",
+            Target = peer.Address,
+            Fingerprint = peer.Fingerprint,
+            Trust = trust,
+            PeerName = peer.Name,
+        });
+        ShowBanner($"Copying from {peer.Name}…");
+    }
+
+    void ApplyRemoteClipboard(WireEvent ev)
+    {
+        if (ev.Ok == false)
+        {
+            ShowBanner(string.IsNullOrEmpty(ev.Error) ? "Couldn't copy that clipboard." : ev.Error!);
+            return;
+        }
+
+        var text = ev.Text ?? "";
+        byte[]? png = null;
+        if (!string.IsNullOrEmpty(ev.ImagePng))
+        {
+            try
+            {
+                png = Convert.FromBase64String(ev.ImagePng);
+            }
+            catch
+            {
+                png = null;
+            }
+        }
+
+        if (text.Length == 0 && (png == null || png.Length == 0))
+        {
+            ShowBanner($"{ev.Peer ?? "That device"} has nothing on the clipboard.");
+            return;
+        }
+
+        _ = ClipboardSync.ApplyAsync(text, png);
+        var name = string.IsNullOrEmpty(ev.Peer) ? "that device" : ev.Peer;
+        ShowBanner(png is { Length: > 0 } && text.Length > 0
+            ? $"Copied text and an image from {name}."
+            : png is { Length: > 0 }
+                ? $"Copied an image from {name}."
+                : $"Copied from {name}.");
     }
 
     void BeginSend(Peer peer, bool trust)
@@ -763,6 +869,9 @@ public sealed class AppModel : Observable
                 _ready = true;
                 ApplySavedPreferences();
                 Touch();
+                break;
+            case "clipboard":
+                ApplyRemoteClipboard(ev);
                 break;
             case "ack":
                 if (ev.Ok == false && !string.IsNullOrEmpty(ev.Error))

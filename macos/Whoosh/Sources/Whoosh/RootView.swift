@@ -388,7 +388,22 @@ private struct PeerRow: View {
 
     var body: some View {
         // The window is a file drop target. A tap gesture on this row loses
-        // that click, so choosing an iPhone never enabled Send.
+        // that click, so choosing an iPhone never enabled Send. The clipboard
+        // control stays outside that button; a nested button does not receive clicks.
+        selectButton
+            .overlay(alignment: .trailing) { clipboardOverlay }
+            .onHover { inside in
+                hovering = inside
+                if inside {
+                    NSCursor.pointingHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .accessibilityElement(children: .contain)
+    }
+
+    private var selectButton: some View {
         Button {
             model.select(peer)
         } label: {
@@ -404,12 +419,10 @@ private struct PeerRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                Text(protocolLabel(peer.via))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                if peer.showsClipboard {
+                    Color.clear.frame(width: 28, height: 28)
+                }
+                protocolBadge
                 Circle()
                     .fill(selected ? Theme.signal(scheme) : Color.clear)
                     .frame(width: 6, height: 6)
@@ -424,15 +437,42 @@ private struct PeerRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(RowButtonStyle())
-        .onHover { inside in
-            hovering = inside
-            if inside {
-                NSCursor.pointingHand.set()
-            } else {
-                NSCursor.arrow.set()
-            }
-        }
         .accessibilityLabel("\(peer.name), \(protocolLabel(peer.via))")
+    }
+
+    @ViewBuilder
+    private var clipboardOverlay: some View {
+        if peer.showsClipboard {
+            HStack(spacing: 10) {
+                Button {
+                    model.copyFrom(peer)
+                } label: {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(peer.clipboardTip)
+                .accessibilityLabel(peer.clipboardAccessLabel)
+                .accessibilityIdentifier("CopyClipboard")
+                protocolBadge.hidden()
+                Circle()
+                    .fill(Color.clear)
+                    .frame(width: 6, height: 6)
+            }
+            .padding(.trailing, 10)
+        }
+    }
+
+    private var protocolBadge: some View {
+        Text(protocolLabel(peer.via))
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.primary.opacity(0.06)))
     }
 }
 

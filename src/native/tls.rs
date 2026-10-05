@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex, Once};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
@@ -153,10 +154,84 @@ pub fn fast_transport() -> quinn::TransportConfig {
     transport
 }
 
+/// Asks for a client certificate but still accepts file-send clients that have none.
+/// Clipboard pulls check the certificate fingerprint separately.
+#[derive(Debug)]
+struct OptionalClientAuth {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl OptionalClientAuth {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        })
+    }
+}
+
+impl ClientCertVerifier for OptionalClientAuth {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        // Possession of the private key is checked by the signature verifiers.
+        // The clipboard handler decides whether this fingerprint is one of ours.
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 pub fn server_config(identity: &IdentityCert) -> Result<quinn::ServerConfig> {
     install_crypto();
     let mut rustls_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
+        .with_client_cert_verifier(OptionalClientAuth::new())
         .with_single_cert(
             vec![identity.cert_der.clone()],
             identity.key_der.clone_key(),
@@ -184,22 +259,46 @@ pub struct ClientCrypto {
 }
 
 pub fn client_config(trust: Trust) -> Result<ClientCrypto> {
+    client_config_with_identity(trust, None)
+}
+
+/// Same as [`client_config`], and presents `identity` when the peer asks who is connecting.
+pub fn client_config_with_identity(
+    trust: Trust,
+    identity: Option<&IdentityCert>,
+) -> Result<ClientCrypto> {
     install_crypto();
     let seen = Arc::new(Mutex::new(None));
+    macro_rules! authed {
+        ($builder:expr) => {{
+            if let Some(identity) = identity {
+                $builder
+                    .with_client_auth_cert(
+                        vec![identity.cert_der.clone()],
+                        identity.key_der.clone_key(),
+                    )
+                    .map_err(|error| Error::crypto(error.to_string()))?
+            } else {
+                $builder.with_no_client_auth()
+            }
+        }};
+    }
     let mut rustls_config = match trust {
         Trust::Roots(cert) => {
             let mut roots = rustls::RootCertStore::empty();
             roots
                 .add(cert)
                 .map_err(|error| Error::crypto(error.to_string()))?;
-            rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth()
+            authed!(rustls::ClientConfig::builder().with_root_certificates(roots))
         }
-        Trust::Fingerprint(expected) => rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(FingerprintVerifier::new(expected, seen.clone()))
-            .with_no_client_auth(),
+        Trust::Fingerprint(expected) => {
+            authed!(rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(FingerprintVerifier::new(
+                    expected,
+                    seen.clone()
+                )))
+        }
     };
     rustls_config.alpn_protocols = vec![ALPN.to_vec()];
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(rustls_config)

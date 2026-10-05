@@ -12,7 +12,7 @@ use crate::approve::{approve_all, Approval};
 use crate::discover::Advertisement;
 use crate::error::Result;
 use crate::native::{
-    fingerprint_hex, NativeListener, ReceiveOptions, SERVICE_TYPE as NATIVE_SERVICE,
+    fingerprint_hex, NativeListener, ReceiveOptions, SessionResult, SERVICE_TYPE as NATIVE_SERVICE,
 };
 use crate::net::{awdl_listeners, bind_airdrop_listener, visibility_report};
 use crate::progress::ReceiveLog;
@@ -110,18 +110,21 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             max_file_bytes: config.max_file_bytes,
             approve: config.approve.clone(),
             on_progress: Some(progress.hook("whoosh")),
+            clipboard: crate::native::ClipboardStore::default(),
+            allow_device: std::sync::Arc::new(crate::trust::fingerprint_is_trusted),
         };
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     result = listener.receive_one(options.clone()) => match result {
-                        Ok(report) => println!(
+                        Ok(SessionResult::Files(report)) => println!(
                             "received {} file(s), {} bytes, from {}",
                             report.files.len(),
                             report.bytes,
                             report.peer
                         ),
+                        Ok(SessionResult::Clipboard) => {}
                         Err(error) => tracing::info!(%error, "native transfer did not complete"),
                     },
                     _ = cancel.cancelled() => break,

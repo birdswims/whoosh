@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,8 +29,8 @@ use crate::discover::{self, device_name, Advertisement, FoundPeer, PeerBrowser, 
 use crate::error::{Error, Result};
 use crate::mime::MediaKind;
 use crate::native::{
-    self, fingerprint_hex, generate_identity, identity_from_der, NativeListener, ReceiveOptions,
-    Trust,
+    self, fingerprint_hex, generate_identity, identity_from_der, pull_clipboard, ClipboardStore,
+    NativeListener, ReceiveOptions, SessionResult, Trust,
 };
 use crate::net::{self, awdl_listeners, bind_airdrop_listener};
 use crate::note::{SavedHook, SavedNote};
@@ -107,6 +108,8 @@ struct Command {
     accept: Option<bool>,
     offer: Option<String>,
     peer_name: Option<String>,
+    text: Option<String>,
+    image_png: Option<String>,
 }
 
 impl Default for Command {
@@ -132,6 +135,8 @@ impl Default for Command {
             accept: None,
             offer: None,
             peer_name: None,
+            text: None,
+            image_png: None,
         }
     }
 }
@@ -201,6 +206,7 @@ struct Host {
     offers: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     incoming: Arc<Mutex<Vec<LiveReceive>>>,
     filter: Arc<Mutex<Filter>>,
+    clipboard: ClipboardStore,
 }
 
 struct SendJob {
@@ -293,6 +299,7 @@ async fn serve(
         offers: Arc::new(Mutex::new(HashMap::new())),
         incoming: Arc::new(Mutex::new(Vec::new())),
         filter: Arc::new(Mutex::new(Filter::default())),
+        clipboard: ClipboardStore::default(),
     };
     emit.event(json!({
         "ev": "hello",
@@ -408,6 +415,19 @@ async fn handle(host: &mut Host, command: &Command, emit: &Emit) -> Result<()> {
             let emit = emit.clone();
             tokio::spawn(async move {
                 run_send(job, emit).await;
+            });
+            Ok(())
+        }
+        "clipboard" => {
+            let text = command.text.clone().unwrap_or_default();
+            let image_png = decode_png(command.image_png.as_deref())?;
+            host.clipboard.publish(text, image_png)
+        }
+        "clipboard-pull" => {
+            let job = prepare_clipboard_pull(host, command)?;
+            let emit = emit.clone();
+            tokio::spawn(async move {
+                run_clipboard_pull(job, emit).await;
             });
             Ok(())
         }
@@ -578,13 +598,16 @@ async fn start_native(
         max_file_bytes: host.config.max_file_bytes,
         approve,
         on_progress: Some(receive_progress(emit, incoming.clone(), "whoosh")),
+        clipboard: host.clipboard.clone(),
+        allow_device: Arc::new(trust::fingerprint_is_trusted),
     };
     let task_emit = emit.clone();
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 result = listener.receive_one(options.clone()) => match result {
-                    Ok(report) => {
+                    Ok(SessionResult::Clipboard) => {}
+                    Ok(SessionResult::Files(report)) => {
                         let id = finish_live(&incoming, "whoosh", &report.peer);
                         let paths = report
                             .files
@@ -957,6 +980,108 @@ fn gui_approval(
             accepted
         }
     })
+}
+
+fn decode_png(value: Option<&str>) -> Result<Vec<u8>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| Error::protocol("clipboard image is invalid"))
+}
+
+struct ClipboardJob {
+    addr: SocketAddr,
+    fingerprint: [u8; 32],
+    peer_name: String,
+    sender_name: String,
+    identity_cert: Vec<u8>,
+    identity_key: Vec<u8>,
+}
+
+fn prepare_clipboard_pull(host: &Host, command: &Command) -> Result<ClipboardJob> {
+    let target = command
+        .target
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Error::protocol("choose a device"))?;
+    let addr = discover::parse_peer_addr(&target)
+        .ok_or_else(|| Error::protocol("device address is invalid"))?;
+    let text = command
+        .fingerprint
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| Error::protocol("that device did not share a fingerprint"))?;
+    let fingerprint = trust::parse_fingerprint(text)
+        .ok_or_else(|| Error::protocol("fingerprint is invalid"))?;
+    let already = trust::fingerprint_is_trusted(&fingerprint) || trust::remembered(&addr).is_some();
+    if command.trust.unwrap_or(false) {
+        trust::remember(&addr, &fingerprint)?;
+    } else if !already {
+        return Err(Error::protocol(
+            "trust this device before copying its clipboard",
+        ));
+    }
+    Ok(ClipboardJob {
+        addr,
+        fingerprint,
+        peer_name: command
+            .peer_name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(target),
+        sender_name: host.config.name.clone(),
+        identity_cert: host.cert_der.clone(),
+        identity_key: host.key_der.clone(),
+    })
+}
+
+async fn run_clipboard_pull(job: ClipboardJob, emit: Emit) {
+    let identity = identity_from_der(job.identity_cert, job.identity_key);
+    let result = pull_clipboard(
+        job.addr,
+        &job.sender_name,
+        Trust::Fingerprint(Some(job.fingerprint)),
+        &identity,
+    )
+    .await;
+    match result {
+        Ok(item) => {
+            let image = if item.image_png.is_empty() {
+                Value::Null
+            } else {
+                Value::String(base64::engine::general_purpose::STANDARD.encode(item.image_png))
+            };
+            emit.event(json!({
+                "ev": "clipboard",
+                "id": random_id(),
+                "ok": true,
+                "peer": job.peer_name,
+                "text": item.text,
+                "image_png": image,
+            }));
+        }
+        Err(error) => {
+            let message = match &error {
+                Error::Rejected(reason) if reason == "not a trusted device" => {
+                    format!("Trust this computer on {}, then try again.", job.peer_name)
+                }
+                Error::Rejected(reason) => reason.clone(),
+                _ => format!(
+                    "Can't reach {}. Leave Whoosh open and receiving there.",
+                    job.peer_name
+                ),
+            };
+            emit.event(json!({
+                "ev": "clipboard",
+                "id": random_id(),
+                "ok": false,
+                "peer": job.peer_name,
+                "error": message,
+            }));
+        }
+    }
 }
 
 fn prepare_send(host: &Host, command: &Command) -> Result<SendJob> {
@@ -1531,7 +1656,11 @@ fn list_native(peer: FoundPeer) -> Listed {
         .get("fp")
         .cloned()
         .filter(|value| trust::parse_fingerprint(value).is_some());
-    let trusted = trust::remembered(&peer.addr).is_some();
+    let trusted = fingerprint
+        .as_deref()
+        .and_then(trust::parse_fingerprint)
+        .is_some_and(|fingerprint| trust::fingerprint_is_trusted(&fingerprint))
+        || trust::remembered(&peer.addr).is_some();
     let address = peer.addr.to_string();
     let detail = fingerprint
         .as_deref()

@@ -264,9 +264,10 @@
                         </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <Grid Padding="4,2" AutomationProperties.Name="{Binding Name}" ColumnSpacing="10">
+                                <Grid Padding="4,2" AutomationProperties.Name="{Binding Name}" ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
@@ -278,7 +279,20 @@
                                             Text="{Binding Detail}"
                                             TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
-                                    <Border Grid.Column="1" Padding="8,3" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
+                                    <Button
+                                        Grid.Column="1"
+                                        MinWidth="36"
+                                        Padding="8,4"
+                                        VerticalAlignment="Center"
+                                        AutomationProperties.AutomationId="CopyClipboard"
+                                        AutomationProperties.Name="{Binding ClipboardAccessLabel}"
+                                        Click="Clipboard_Click"
+                                        Tag="{Binding}"
+                                        ToolTipService.ToolTip="{Binding ClipboardTip}"
+                                        Visibility="{Binding ShowClipboard, Converter={StaticResource Vis}}">
+                                        <FontIcon FontSize="14" Glyph="&#xE8C8;" />
+                                    </Button>
+                                    <Border Grid.Column="2" Padding="8,3" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
                                         <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding ProtocolLabel}" />
                                     </Border>
                                 </Grid>
@@ -367,7 +381,7 @@
                         TextWrapping="Wrap" />
                     <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Spacing="8">
                         <Button Click="TrustCancel_Click" Content="Cancel" />
-                        <Button AutomationProperties.AutomationId="TrustSend" Click="TrustSend_Click" Content="Trust and send" Style="{StaticResource AccentButtonStyle}" />
+                        <Button x:Name="TrustConfirm" AutomationProperties.AutomationId="TrustSend" Click="TrustSend_Click" Content="Trust and send" Style="{StaticResource AccentButtonStyle}" />
                     </StackPanel>
                 </StackPanel>
             </Border>

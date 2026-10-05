@@ -85,6 +85,7 @@ public sealed partial class MainWindow : Window
         if (e.PropertyName is nameof(AppModel.Receiving)
             or nameof(AppModel.CurrentOffer)
             or nameof(AppModel.TrustPeer)
+            or nameof(AppModel.TrustForClipboard)
             or nameof(AppModel.EngineDown)
             or null)
         {
@@ -135,9 +136,12 @@ public sealed partial class MainWindow : Window
         }
 
         TrustTitle.Text = $"Trust {peer.Name}?";
+        TrustConfirm.Content = _model.TrustForClipboard ? "Trust and copy" : "Trust and send";
         if (!string.IsNullOrEmpty(peer.Fingerprint))
         {
-            TrustBody.Text = $"Compare this fingerprint with the one shown on {peer.Name}. Later sends to this address check it again.";
+            TrustBody.Text = _model.TrustForClipboard
+                ? $"Compare this fingerprint with Settings on {peer.Name}. Clipboard sharing is encrypted and only works with devices you both trust. {peer.Name} has to trust this computer too."
+                : $"Compare this fingerprint with the one shown on {peer.Name}. Later sends to this address check it again. Trusted Whoosh devices can also copy this computer's clipboard.";
             TrustPrint.Text = Format.Fingerprint(peer.Fingerprint);
             TrustPrint.Visibility = Visibility.Visible;
         }
@@ -261,6 +265,14 @@ public sealed partial class MainWindow : Window
         if (sender is Button { Tag: string path })
         {
             _model.RemoveFile(path);
+        }
+    }
+
+    void Clipboard_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: Peer peer })
+        {
+            _model.CopyFromPeer(peer);
         }
     }
 

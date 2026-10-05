@@ -105,7 +105,9 @@ struct TrustOverlay: View {
                         .font(.system(size: 18, weight: .semibold))
                         .lineLimit(2)
                     if let fingerprint = peer.fingerprint, !fingerprint.isEmpty {
-                        Text("Compare this fingerprint with the one shown on \(peer.name). Later sends to this address check it again.")
+                        Text(model.trustForClipboard
+                             ? "Compare this fingerprint with Settings on \(peer.name). Clipboard sharing is encrypted and only works with devices you both trust. \(peer.name) has to trust this computer too."
+                             : "Compare this fingerprint with the one shown on \(peer.name). Later sends to this address check it again. Trusted Whoosh devices can also copy this computer's clipboard.")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -130,7 +132,7 @@ struct TrustOverlay: View {
                         Button("Cancel", action: model.cancelTrust)
                             .buttonStyle(.bordered)
                             .keyboardShortcut(.cancelAction)
-                        Button("Trust and send", action: model.confirmTrust)
+                        Button(model.trustForClipboard ? "Trust and copy" : "Trust and send", action: model.confirmTrust)
                             .buttonStyle(.borderedProminent)
                             .keyboardShortcut(.defaultAction)
                     }

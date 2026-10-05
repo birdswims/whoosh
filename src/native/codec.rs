@@ -13,12 +13,20 @@ pub const MAX_NAME: usize = 1024;
 pub const MAX_FILES: usize = 4096;
 pub const MAX_MIME: usize = 128;
 pub const MAX_REASON: usize = 512;
+pub const MAX_CLIPBOARD_TEXT: usize = 1024 * 1024;
+pub const MAX_CLIPBOARD_IMAGE: usize = 8 * 1024 * 1024;
+/// Largest control frame. Clipboard images are the only message that needs this.
+pub const MAX_CONTROL_FRAME: usize = MAX_CLIPBOARD_TEXT + MAX_CLIPBOARD_IMAGE + 64;
 
 const HELLO: u8 = 1;
 const OFFER: u8 = 2;
 const ACCEPT: u8 = 3;
 const REJECT: u8 = 4;
 const DONE: u8 = 5;
+const CLIPBOARD_PULL: u8 = 6;
+const CLIPBOARD: u8 = 7;
+
+const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 const FLAG_PIN: u8 = 0b0000_0001;
 
@@ -44,6 +52,14 @@ pub struct Offer {
     pub files: Vec<FileOffer>,
 }
 
+/// Text and an optional PNG captured from one computer's clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clipboard {
+    pub request_id: [u8; 16],
+    pub text: String,
+    pub image_png: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     Hello(Hello),
@@ -58,6 +74,11 @@ pub enum Control {
     Done {
         transfer_id: [u8; 16],
     },
+    /// Ask a trusted device for its current clipboard. No file bytes follow.
+    ClipboardPull {
+        request_id: [u8; 16],
+    },
+    Clipboard(Clipboard),
 }
 
 pub fn encode(message: &Control) -> Result<Vec<u8>> {
@@ -99,6 +120,19 @@ pub fn encode(message: &Control) -> Result<Vec<u8>> {
         Control::Done { transfer_id } => {
             body.push(DONE);
             body.extend_from_slice(transfer_id);
+        }
+        Control::ClipboardPull { request_id } => {
+            body.push(CLIPBOARD_PULL);
+            body.extend_from_slice(request_id);
+        }
+        Control::Clipboard(clipboard) => {
+            body.push(CLIPBOARD);
+            body.extend_from_slice(&clipboard.request_id);
+            write_bytes(&mut body, clipboard.text.as_bytes(), MAX_CLIPBOARD_TEXT)?;
+            if !clipboard.image_png.is_empty() && !clipboard.image_png.starts_with(PNG_MAGIC) {
+                return Err(Error::protocol("clipboard image is not a png"));
+            }
+            write_bytes(&mut body, &clipboard.image_png, MAX_CLIPBOARD_IMAGE)?;
         }
     }
     let mut framed = Vec::with_capacity(4 + body.len());
@@ -171,6 +205,28 @@ pub fn decode(mut bytes: &[u8]) -> Result<(Control, usize)> {
             take_bytes(&mut bytes, &mut transfer_id)?;
             Control::Done { transfer_id }
         }
+        CLIPBOARD_PULL => {
+            let mut request_id = [0u8; 16];
+            take_bytes(&mut bytes, &mut request_id)?;
+            Control::ClipboardPull { request_id }
+        }
+        CLIPBOARD => {
+            let mut request_id = [0u8; 16];
+            take_bytes(&mut bytes, &mut request_id)?;
+            let text_bytes = take_bytes_len(&mut bytes, MAX_CLIPBOARD_TEXT)?;
+            let text = std::str::from_utf8(&text_bytes)
+                .map_err(|_| Error::protocol("clipboard text is not utf-8"))?
+                .to_string();
+            let image_png = take_bytes_len(&mut bytes, MAX_CLIPBOARD_IMAGE)?;
+            if !image_png.is_empty() && !image_png.starts_with(PNG_MAGIC) {
+                return Err(Error::protocol("clipboard image is not a png"));
+            }
+            Control::Clipboard(Clipboard {
+                request_id,
+                text,
+                image_png,
+            })
+        }
         _ => return Err(Error::protocol(format!("unknown control tag {tag}"))),
     };
     if !bytes.is_empty() {
@@ -185,6 +241,15 @@ fn write_str(out: &mut Vec<u8>, value: &str, max: usize) -> Result<()> {
     }
     out.extend_from_slice(&(value.len() as u16).to_le_bytes());
     out.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn write_bytes(out: &mut Vec<u8>, value: &[u8], max: usize) -> Result<()> {
+    if value.len() > max {
+        return Err(Error::protocol("field too long"));
+    }
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(value);
     Ok(())
 }
 
@@ -223,6 +288,19 @@ fn take_u64(bytes: &mut &[u8]) -> Result<u64> {
     Ok(u64::from_le_bytes(raw))
 }
 
+fn take_bytes_len(bytes: &mut &[u8], max: usize) -> Result<Vec<u8>> {
+    let len = take_u32(bytes)? as usize;
+    if len > max {
+        return Err(Error::protocol("field too long"));
+    }
+    if bytes.len() < len {
+        return Err(Error::protocol("truncated"));
+    }
+    let value = bytes[..len].to_vec();
+    *bytes = &bytes[len..];
+    Ok(value)
+}
+
 fn take_str(bytes: &mut &[u8], max: usize) -> Result<String> {
     let len = take_u16(bytes)? as usize;
     if len > max {
@@ -246,7 +324,7 @@ pub fn encode_file_header(file_id: u32, size: u64) -> [u8; 12] {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode, Control, FileOffer, Hello, Offer};
+    use super::{decode, encode, Clipboard, Control, FileOffer, Hello, Offer};
 
     #[test]
     fn roundtrips_every_message() {
@@ -276,6 +354,14 @@ mod tests {
             Control::Done {
                 transfer_id: [4; 16],
             },
+            Control::ClipboardPull {
+                request_id: [5; 16],
+            },
+            Control::Clipboard(Clipboard {
+                request_id: [6; 16],
+                text: "hello".into(),
+                image_png: b"\x89PNG\r\n\x1a\nrest".to_vec(),
+            }),
         ];
         for message in messages {
             let bytes = encode(&message).unwrap();
