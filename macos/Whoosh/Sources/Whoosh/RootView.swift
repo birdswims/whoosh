@@ -414,10 +414,27 @@ private struct NearbyCard: View {
                                     PeerRow(peer: peer, selected: peer.id == model.selectedPeerID)
                                 }
                             } label: {
-                                Text(model.hiddenDevicesTitle)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                // The arrow is the group's only hit target. A button is
+                                // required; a tap gesture is lost to the window drop target.
+                                Button {
+                                    withAnimation(.easeOut(duration: 0.16)) {
+                                        showHiddenDevices.toggle()
+                                    }
+                                } label: {
+                                    Text(model.hiddenDevicesTitle)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(RowButtonStyle())
+                                .onHover { inside in
+                                    if inside {
+                                        NSCursor.pointingHand.set()
+                                    } else {
+                                        NSCursor.arrow.set()
+                                    }
+                                }
                             }
                             .accessibilityIdentifier("HiddenDevices")
                             .padding(.top, 8)
