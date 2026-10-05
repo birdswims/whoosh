@@ -170,8 +170,6 @@ struct Runtime {
 #[derive(Clone, Default)]
 struct Filter {
     native_port: Option<u16>,
-    quickshare_port: Option<u16>,
-    airdrop_port: Option<u16>,
     fingerprint: Option<String>,
     airdrop_instance: Option<String>,
 }
@@ -536,24 +534,22 @@ async fn start(host: &mut Host, emit: &Emit) -> Result<()> {
     }
     if host.config.quickshare {
         match start_quickshare(host, approve.clone(), cancel.clone(), emit).await {
-            Ok((task, advert, port)) => {
+            Ok((task, advert, _port)) => {
                 tasks.push(task);
                 if let Some(advert) = advert {
                     adverts.push(advert);
                 }
-                filter.quickshare_port = Some(port);
             }
             Err(error) => warnings.push(format!("Quick Share listener: {error}")),
         }
     }
     if host.config.airdrop {
         match start_airdrop(host, approve, cancel.clone(), emit).await {
-            Ok((air_tasks, advert, port, instance)) => {
+            Ok((air_tasks, advert, _port, instance)) => {
                 tasks.extend(air_tasks);
                 if let Some(advert) = advert {
                     adverts.push(advert);
                 }
-                filter.airdrop_port = Some(port);
                 filter.airdrop_instance = Some(instance);
             }
             Err(error) => warnings.push(format!("AirDrop listener: {error}")),
@@ -1834,19 +1830,17 @@ impl Filter {
         let Some(addr) = discover::parse_peer_addr(&peer.address) else {
             return false;
         };
-        let local = is_local(addr.ip());
+        // Windows Quick Share, and this computer's own listeners, use an
+        // address that belongs to a local interface. The system service picks
+        // its own port, so matching only Whoosh's listener leaves that row up.
+        if is_local(addr.ip()) {
+            return true;
+        }
         match peer.via {
-            "whoosh" => {
-                let same_cert = peer.fingerprint.is_some() && self.fingerprint == peer.fingerprint;
-                let same_socket = self.native_port == Some(addr.port()) && local;
-                same_cert || same_socket
-            }
-            "quickshare" => self.quickshare_port == Some(addr.port()) && local,
+            "whoosh" => peer.fingerprint.is_some() && self.fingerprint == peer.fingerprint,
             "airdrop" => {
-                let same_instance = !peer.instance.is_empty()
-                    && self.airdrop_instance.as_ref() == Some(&peer.instance);
-                let same_socket = self.airdrop_port == Some(addr.port()) && local;
-                same_instance || same_socket
+                !peer.instance.is_empty()
+                    && self.airdrop_instance.as_ref() == Some(&peer.instance)
             }
             _ => false,
         }
@@ -2217,12 +2211,23 @@ fn via_rank(via: &str) -> u8 {
 }
 
 fn is_local(addr: IpAddr) -> bool {
-    if addr.is_loopback() {
+    let addr = canonical_ip(addr);
+    if addr.is_loopback() || addr.is_unspecified() {
         return true;
     }
     if_addrs::get_if_addrs()
-        .map(|list| list.into_iter().any(|iface| iface.ip() == addr))
+        .map(|list| {
+            list.into_iter()
+                .any(|iface| canonical_ip(iface.ip()) == addr)
+        })
         .unwrap_or(false)
+}
+
+fn canonical_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
+        other => other,
+    }
 }
 
 fn random_pin() -> String {
@@ -2440,11 +2445,9 @@ mod tests {
     }
 
     #[test]
-    fn hides_this_macs_listener_only() {
+    fn hides_every_service_on_this_computer() {
         let filter = Filter {
             native_port: Some(45823),
-            quickshare_port: Some(22000),
-            airdrop_port: Some(8770),
             fingerprint: Some("ab".repeat(32)),
             airdrop_instance: Some("aabbccddeeff".into()),
         };
@@ -2454,17 +2457,61 @@ mod tests {
             Some(filter.fingerprint.clone().unwrap()),
             "other",
         )));
-        assert!(filter.hides(&sample("whoosh", "127.0.0.1:45823", None, "self")));
+        assert!(filter.hides(&sample("whoosh", "127.0.0.1:9", None, "self")));
+        assert!(filter.hides(&sample(
+            "whoosh",
+            "[::ffff:127.0.0.1]:9",
+            Some("cd".repeat(32)),
+            "self-mapped",
+        )));
         assert!(!filter.hides(&sample(
             "whoosh",
             "203.0.113.9:45823",
             Some("cd".repeat(32)),
             "neighbor",
         )));
-        assert!(filter.hides(&sample("quickshare", "127.0.0.1:22000", None, "self",)));
-        assert!(!filter.hides(&sample("quickshare", "203.0.113.8:22000", None, "phone",)));
-        assert!(filter.hides(&sample("airdrop", "203.0.113.7:9", None, "aabbccddeeff")));
-        assert!(!filter.hides(&sample("airdrop", "203.0.113.7:8770", None, "someone")));
+        // The system Quick Share service uses its own port on a local address.
+        assert!(filter.hides(&sample(
+            "quickshare",
+            "127.0.0.1:49187",
+            None,
+            "Hariom's Windows",
+        )));
+        assert!(!filter.hides(&sample(
+            "quickshare",
+            "203.0.113.8:49187",
+            None,
+            "phone",
+        )));
+        assert!(filter.hides(&sample(
+            "airdrop",
+            "127.0.0.1:8771",
+            None,
+            "someone",
+        )));
+        assert!(filter.hides(&sample(
+            "airdrop",
+            "203.0.113.7:9",
+            None,
+            "aabbccddeeff",
+        )));
+        assert!(!filter.hides(&sample(
+            "airdrop",
+            "203.0.113.7:8770",
+            None,
+            "someone",
+        )));
+        let Some(interfaces) = if_addrs::get_if_addrs().ok() else {
+            return;
+        };
+        let Some(ip) = interfaces.into_iter().find_map(|iface| {
+            let ip = iface.ip();
+            (!ip.is_loopback()).then_some(ip)
+        }) else {
+            return;
+        };
+        let address = SocketAddr::new(ip, 49187).to_string();
+        assert!(filter.hides(&sample("quickshare", &address, None, "this-computer")));
     }
 
     fn sample(
