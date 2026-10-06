@@ -50,6 +50,8 @@ internal static class Uninstall
             // The Apps list entry can be removed by hand if this fails.
         }
 
+        StartupRegistration.Remove();
+
         try
         {
             Process.Start(new ProcessStartInfo

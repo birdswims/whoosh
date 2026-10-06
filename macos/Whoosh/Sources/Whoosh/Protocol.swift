@@ -129,6 +129,22 @@ struct Offer: Identifiable, Equatable {
     var sizeUnknown: Bool {
         files.contains { !$0.isSizeKnown }
     }
+
+    /// One line for a background notification. The peer name is the title.
+    var requestSummary: String {
+        let count = files.count
+        if count == 1 {
+            let name = files[0].name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                return "Wants to send \(name)."
+            }
+            return "Wants to send 1 file."
+        }
+        if count > 1 {
+            return "Wants to send \(count) files."
+        }
+        return "Wants to send files."
+    }
 }
 
 struct SendFile: Identifiable, Hashable {
@@ -227,6 +243,8 @@ enum Pref {
     static let requirePin = "whoosh.requirePin"
     static let receiving = "whoosh.receiving"
     static let selected = "whoosh.selectedPeer"
+    static let runInBackground = "whoosh.runInBackground"
+    static let startAtLogin = "whoosh.startAtLogin"
 }
 
 func protocolLabel(_ via: String) -> String {

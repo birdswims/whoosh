@@ -305,8 +305,11 @@ struct TransferBar: View {
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage(Pref.runInBackground) private var runInBackground = false
     @State private var draftName = ""
     @State private var nameDirty = false
+    @State private var startAtLogin = false
+    @State private var loginNote = ""
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -403,6 +406,18 @@ struct SettingsView: View {
                     "Whoosh senders enter the code in the window",
                     Binding(get: { model.requirePin }, set: { model.requirePin = $0; storeFlag(Pref.requirePin, $0) })
                 )
+                Divider().opacity(0.4)
+                settingToggle(
+                    "Start at login",
+                    "Open Whoosh when you sign in to this Mac",
+                    Binding(get: { startAtLogin }, set: { setLoginItem($0) })
+                )
+                Divider().opacity(0.4)
+                settingToggle(
+                    "Run in the background",
+                    "Stay in the menu bar after the window closes, and be notified of incoming requests",
+                    $runInBackground
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
@@ -410,6 +425,13 @@ struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color.primary.opacity(0.03))
             )
+
+            if !loginNote.isEmpty {
+                Text(loginNote)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -498,7 +520,11 @@ struct SettingsView: View {
         .onAppear {
             draftName = model.deviceName
             nameDirty = false
+            refreshLoginItem()
             model.refreshTrusted()
+        }
+        .onChange(of: runInBackground) { _, enabled in
+            Session.backgroundChanged(enabled)
         }
         .onChange(of: model.deviceName) { _, name in
             if !nameDirty && !nameFocused {
@@ -547,5 +573,16 @@ struct SettingsView: View {
     private func storeFlag(_ key: String, _ value: Bool) {
         UserDefaults.standard.set(value, forKey: key)
         model.pushConfig()
+    }
+
+    private func refreshLoginItem() {
+        startAtLogin = LoginItem.isOn
+        loginNote = LoginItem.note
+    }
+
+    private func setLoginItem(_ enabled: Bool) {
+        let failure = LoginItem.update(enabled)
+        startAtLogin = LoginItem.isOn
+        loginNote = failure ?? LoginItem.note
     }
 }

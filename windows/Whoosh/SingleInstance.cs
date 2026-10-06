@@ -28,11 +28,25 @@ internal static class SingleInstance
             return true;
         }
 
-        ActivateExisting();
         return false;
     }
 
-    static void ActivateExisting()
+    /// The calling process still has the user's foreground right. A hidden
+    /// Whoosh window may not have a main handle until it is shown, so retry.
+    public static void BringToFront()
+    {
+        for (var attempt = 0; attempt < 25; attempt++)
+        {
+            if (ActivateExisting())
+            {
+                return;
+            }
+
+            Thread.Sleep(100);
+        }
+    }
+
+    public static bool ActivateExisting()
     {
         var current = Process.GetCurrentProcess().Id;
         foreach (var process in Process.GetProcessesByName("Whoosh"))
@@ -44,8 +58,10 @@ internal static class SingleInstance
 
             ShowWindow(process.MainWindowHandle, 9);
             SetForegroundWindow(process.MainWindowHandle);
-            return;
+            return true;
         }
+
+        return false;
     }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]

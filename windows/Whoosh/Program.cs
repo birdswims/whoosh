@@ -38,10 +38,25 @@ public static class Program
             return;
         }
 
+        var background = args.Any(arg => arg is "--background" or "/background");
         var incoming = share is not null ? share.Paths : FileArgs(args);
         SingleInstance.SetAppId();
         if (!SingleInstance.Acquire())
         {
+            if (!background)
+            {
+                // Ask the first process to show its window. A hidden window has
+                // no main handle until that happens; this process then pulls it forward.
+                if (ShareBridge.Show())
+                {
+                    SingleInstance.BringToFront();
+                }
+                else
+                {
+                    SingleInstance.ActivateExisting();
+                }
+            }
+
             if (incoming.Count > 0 && !ShareBridge.Send(incoming))
             {
                 share?.Fail("Whoosh is not ready to receive files.");
@@ -54,6 +69,7 @@ public static class Program
 
         App.LaunchFiles = incoming.ToArray();
         App.PendingShare = share;
+        App.LaunchBackground = background;
         Application.Start(_ =>
         {
             var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());

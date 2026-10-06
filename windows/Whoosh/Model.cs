@@ -265,6 +265,8 @@ public sealed class SavedSettings
     public bool? RequirePin { get; set; }
     public bool? Receiving { get; set; }
     public string? SelectedPeer { get; set; }
+    public bool LaunchAtLogin { get; set; }
+    public bool RunInBackground { get; set; }
 }
 
 public sealed class AppModel : Observable
@@ -340,6 +342,8 @@ public sealed class AppModel : Observable
     public string SaveLabel => string.IsNullOrEmpty(SaveDir) ? "Choose a folder" : Format.Abbreviate(SaveDir);
     public string GroupedFingerprint => Fingerprint.Length == 0 ? "Waiting for the engine." : Format.Fingerprint(Fingerprint);
     public string ReceivingLabel => Receiving ? "Receiving" : "Paused";
+    public bool LaunchAtLogin { get; private set; }
+    public bool RunInBackground { get; private set; }
 
     public string StatusLine
     {
@@ -407,6 +411,8 @@ public sealed class AppModel : Observable
     public AppModel()
     {
         _selectedPeerId = _settings.SelectedPeer;
+        LaunchAtLogin = _settings.LaunchAtLogin;
+        RunInBackground = _settings.RunInBackground;
     }
 
     public void Start()
@@ -512,6 +518,45 @@ public sealed class AppModel : Observable
         WriteSettings();
         Touch();
         PushConfig();
+    }
+
+    public void SetLaunchAtLogin(bool enabled)
+    {
+        if (!StartupRegistration.Set(enabled))
+        {
+            Raise(nameof(LaunchAtLogin));
+            ShowBanner("Whoosh could not change the sign-in startup setting.");
+            return;
+        }
+
+        LaunchAtLogin = enabled;
+        Raise(nameof(LaunchAtLogin));
+        _settings.LaunchAtLogin = enabled;
+        WriteSettings();
+    }
+
+    public void SetRunInBackground(bool enabled)
+    {
+        if (RunInBackground == enabled)
+        {
+            return;
+        }
+
+        RunInBackground = enabled;
+        Raise(nameof(RunInBackground));
+        _settings.RunInBackground = enabled;
+        WriteSettings();
+        if (enabled)
+        {
+            TrayIcon.Add();
+            return;
+        }
+
+        TrayIcon.Remove();
+        if (App.Main?.IsOnScreen() != true)
+        {
+            App.Main?.Reveal();
+        }
     }
 
     public void RevealSaveFolder()
@@ -976,6 +1021,17 @@ public sealed class AppModel : Observable
 
                 Raise(nameof(CurrentOffer));
                 Touch();
+                if (RunInBackground && App.Main?.IsOnScreen() != true)
+                {
+                    var body = offer.RequestSummary;
+                    if (_offerQueue.Count > 0)
+                    {
+                        body += " Another request is also waiting.";
+                    }
+
+                    TrayIcon.Notify(offer.Peer, body);
+                }
+
                 break;
             case "offer_resolved":
                 if (!string.IsNullOrEmpty(ev.Id))
@@ -1404,6 +1460,10 @@ public sealed class AppModel : Observable
         EngineError = line.Length == 0 ? "Whoosh stopped unexpectedly." : line.Length > 280 ? line[..280] : line;
         Raise(nameof(EngineError));
         Touch();
+        if (RunInBackground && App.Main?.IsOnScreen() != true)
+        {
+            TrayIcon.Notify("Whoosh", EngineError);
+        }
     }
 
     void ShowBanner(string text, InfoBarSeverity severity = InfoBarSeverity.Error)
@@ -1413,6 +1473,11 @@ public sealed class AppModel : Observable
         Banner = text;
         Raise(nameof(Banner));
         Touch();
+        if (RunInBackground && App.Main?.IsOnScreen() != true && !text.StartsWith("Copying from ", StringComparison.Ordinal))
+        {
+            TrayIcon.Notify("Whoosh", text);
+        }
+
         _bannerTimer?.Stop();
         if (_queue == null)
         {

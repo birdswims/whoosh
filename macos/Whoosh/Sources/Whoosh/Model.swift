@@ -144,6 +144,12 @@ final class AppModel {
                 self?.handleExit(message)
             }
         }
+        // Reopening the window calls this again. A running engine already has
+        // the saved preferences, and resetting that flag would send them twice.
+        guard !engine.isRunning else {
+            watchPasteboard()
+            return
+        }
         didShutdown = false
         engineDown = false
         appliedPrefs = false
@@ -329,6 +335,11 @@ final class AppModel {
     func declineCurrentOffer() {
         guard let offer = currentOffer else { return }
         respond(offer.id, accept: false)
+    }
+
+    /// Accept or decline one queued request, including one answered from a notification.
+    func decide(_ id: String, accept: Bool) {
+        respond(id, accept: accept)
     }
 
     func showActivity(_ item: ActivityItem) {
@@ -574,6 +585,7 @@ final class AppModel {
     }
 
     private func finishOffer(_ id: String) {
+        OfferNotifications.shared.clear(id)
         offerQueue.removeAll { $0.id == id }
         guard currentOffer?.id == id else { return }
         currentOffer = offerQueue.isEmpty ? nil : offerQueue.removeFirst()
@@ -640,6 +652,7 @@ final class AppModel {
             } else {
                 offerQueue.append(offer)
             }
+            Session.announceOffer(offer)
         case "offer_resolved":
             if let id = event.id {
                 respondedOffers.insert(id)
@@ -771,6 +784,7 @@ final class AppModel {
         receiving = false
         let line = message.split(whereSeparator: \.isNewline).last.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         engineError = line.isEmpty ? "Whoosh stopped unexpectedly." : String(line.prefix(280))
+        Session.announceNotice(engineError)
     }
 
     private func showBanner(_ text: String) {
@@ -781,6 +795,7 @@ final class AppModel {
             guard let self, self.bannerToken == token else { return }
             self.banner = nil
         }
+        Session.announceNotice(text)
     }
 
     private func nextID() -> String {

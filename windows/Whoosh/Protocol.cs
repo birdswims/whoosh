@@ -320,4 +320,27 @@ public sealed class Offer
     public ulong TotalBytes => Files.Aggregate(0UL, (sum, file) => sum + file.Bytes);
 
     public bool SizeUnknown => Files.Count > 0 && Files.All(file => file.Bytes == 0);
+
+    public string RequestSummary
+    {
+        get
+        {
+            if (Files.Count == 1 && !string.IsNullOrWhiteSpace(Files[0].Name))
+            {
+                return $"Wants to send {Files[0].Name}.";
+            }
+
+            if (Files.Count == 1)
+            {
+                return "Wants to send 1 file.";
+            }
+
+            if (Files.Count > 1)
+            {
+                return $"Wants to send {Files.Count} files.";
+            }
+
+            return "Wants to send files.";
+        }
+    }
 }

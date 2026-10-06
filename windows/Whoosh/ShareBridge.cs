@@ -3,12 +3,13 @@ using System.Text;
 
 namespace Whoosh;
 
-/// Sends shared paths to the Whoosh window that is already open.
+/// Sends shared paths, or a show request, to the Whoosh window that is already open.
 internal static class ShareBridge
 {
     const string PipeName = "Whoosh.Share";
+    const string ShowCommand = ":show";
 
-    public static void Listen(Action<string[]> deliver)
+    public static void Listen(Action<string[], bool> deliver)
     {
         _ = Task.Run(async () =>
         {
@@ -25,6 +26,7 @@ internal static class ShareBridge
                     await server.WaitForConnectionAsync();
                     using var reader = new StreamReader(server, Encoding.UTF8);
                     var paths = new List<string>();
+                    var show = false;
                     while (await reader.ReadLineAsync() is string line)
                     {
                         if (line.Length == 0)
@@ -32,12 +34,23 @@ internal static class ShareBridge
                             break;
                         }
 
+                        if (line.TrimEnd('\r') == ShowCommand)
+                        {
+                            show = true;
+                            continue;
+                        }
+
                         paths.Add(line);
                     }
 
                     if (paths.Count > 0)
                     {
-                        deliver(paths.ToArray());
+                        show = true;
+                    }
+
+                    if (paths.Count > 0 || show)
+                    {
+                        deliver(paths.ToArray(), show);
                     }
                 }
                 catch
@@ -48,7 +61,11 @@ internal static class ShareBridge
         });
     }
 
-    public static bool Send(IReadOnlyList<string> paths)
+    public static bool Send(IReadOnlyList<string> paths) => Write(paths);
+
+    public static bool Show() => Write([ShowCommand]);
+
+    static bool Write(IReadOnlyList<string> lines)
     {
         for (var attempt = 0; attempt < 40; attempt++)
         {
@@ -60,7 +77,7 @@ internal static class ShareBridge
                 {
                     AutoFlush = true,
                 };
-                foreach (var path in paths)
+                foreach (var path in lines)
                 {
                     var line = path.Replace("\r", "").Replace("\n", "");
                     if (line.Length > 0)

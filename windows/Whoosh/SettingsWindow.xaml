@@ -91,6 +91,28 @@
                         </StackPanel>
                         <ToggleSwitch x:Name="PinSwitch" Grid.Column="1" MinWidth="0" OffContent="" OnContent="" Toggled="Protocol_Toggled" />
                     </Grid>
+                    <Grid Padding="8,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="Medium" Text="Start at login" />
+                            <TextBlock FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Open Whoosh when you sign in to Windows" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="LoginSwitch" Grid.Column="1" MinWidth="0" OffContent="" OnContent="" Toggled="Login_Toggled" />
+                    </Grid>
+                    <Grid Padding="8,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="Medium" Text="Run in the background" />
+                            <TextBlock FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Stay in the notification area after the window closes, and be notified of incoming requests" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="BackgroundSwitch" Grid.Column="1" MinWidth="0" OffContent="" OnContent="" Toggled="Background_Toggled" />
+                    </Grid>
                 </StackPanel>
             </Border>
 

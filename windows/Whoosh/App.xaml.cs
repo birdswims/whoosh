@@ -8,6 +8,7 @@ public partial class App : Application
     public static MainWindow? Main { get; set; }
     public static string[] LaunchFiles { get; set; } = [];
     public static ShareHandoff? PendingShare { get; set; }
+    public static bool LaunchBackground { get; set; }
 
     public App()
     {
@@ -23,13 +24,31 @@ public partial class App : Application
         Model = new AppModel();
         var window = new MainWindow();
         Main = window;
-        window.Activate();
-        ShareBridge.Listen(paths =>
+        window.ApplyLaunchVisibility();
+        if (!window.StartedHidden)
+        {
+            window.Activate();
+        }
+
+        if (Model.RunInBackground)
+        {
+            TrayIcon.Add();
+        }
+
+        StartupRegistration.Set(Model.LaunchAtLogin);
+        ShareBridge.Listen((paths, show) =>
         {
             window.DispatcherQueue.TryEnqueue(() =>
             {
-                Model.AddPaths(paths);
-                window.Activate();
+                if (paths.Length > 0)
+                {
+                    Model.AddPaths(paths);
+                }
+
+                if (show)
+                {
+                    window.Reveal();
+                }
             });
         });
         Model.Start();

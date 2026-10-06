@@ -1,3 +1,4 @@
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -16,6 +17,8 @@ public sealed partial class MainWindow : Window
     bool _sized;
     bool _refreshingPeers;
 
+    public bool StartedHidden { get; private set; }
+
     public MainWindow()
     {
         InitializeComponent();
@@ -32,9 +35,11 @@ public sealed partial class MainWindow : Window
         ActivityPane.DismissRequested += (_, _) => ShowHome();
         Root.ActualThemeChanged += (_, _) => PaintTrustCard();
         PaintTrustCard();
+        AppWindow.Closing += OnClosing;
         Closed += (_, _) =>
         {
             SettingsPane.Commit();
+            TrayIcon.Remove();
             _model.Shutdown();
         };
         Activated += (_, _) =>
@@ -66,6 +71,38 @@ public sealed partial class MainWindow : Window
             ApplyCaptionInset();
             Root.SizeChanged += (_, _) => ApplyCaptionInset();
         };
+    }
+
+    public void ApplyLaunchVisibility()
+    {
+        StartedHidden = App.LaunchBackground
+            && _model.RunInBackground
+            && App.PendingShare == null
+            && App.LaunchFiles.Length == 0;
+        if (StartedHidden)
+        {
+            AppWindow.Hide();
+        }
+    }
+
+    public void Reveal()
+    {
+        AppWindow.Show();
+        Activate();
+    }
+
+    public bool IsOnScreen() => WindowChrome.IsOnScreen(this);
+
+    void OnClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (AppLifetime.Quitting || !_model.RunInBackground)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+        SettingsPane.Commit();
+        DispatcherQueue.TryEnqueue(() => AppWindow.Hide());
     }
 
     void ApplyCaptionInset()

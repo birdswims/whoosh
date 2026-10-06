@@ -7,6 +7,8 @@ internal static class WindowChrome
 {
     const int GwlpWndProc = -4;
     const uint WmGetMinMaxInfo = 0x0024;
+    const uint WmQueryEndSession = 0x0011;
+    const uint WmEndSession = 0x0016;
     const uint WmDpiChanged = 0x02E0;
 
     static readonly WndProc Proc = Hook;
@@ -71,6 +73,12 @@ internal static class WindowChrome
         titleBar.ButtonInactiveBackgroundColor = transparent;
     }
 
+    public static bool IsOnScreen(Window window)
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        return hwnd != IntPtr.Zero && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    }
+
     /// <summary>
     /// Width, in device-independent pixels, to leave clear of the minimize,
     /// maximize, and close buttons. WinUI has reported that inset both in DIPs
@@ -103,6 +111,12 @@ internal static class WindowChrome
 
     static IntPtr Hook(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam)
     {
+        // Cancelling this close would keep the process up across sign-out.
+        if (message is WmQueryEndSession or WmEndSession)
+        {
+            AppLifetime.Quitting = true;
+        }
+
         if (message == WmDpiChanged)
         {
             var dpi = (int)((ulong)wParam.ToInt64() & 0xFFFF);
@@ -161,6 +175,12 @@ internal static class WindowChrome
 
     [DllImport("user32.dll")]
     static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    static extern bool IsIconic(IntPtr hwnd);
 
     [DllImport("user32.dll")]
     static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);

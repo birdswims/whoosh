@@ -6,6 +6,7 @@ import Foundation
 final class Engine {
     var onEvent: ((WireEvent) -> Void)?
     var onExit: ((Int32, String) -> Void)?
+    var isRunning: Bool { process?.isRunning == true }
 
     private var process: Process?
     private var input: FileHandle?

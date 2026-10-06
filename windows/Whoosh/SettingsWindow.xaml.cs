@@ -21,7 +21,7 @@ public sealed partial class SettingsWindow : UserControl
         Root.DataContext = _model;
         _model.PropertyChanged += (_, e) =>
         {
-            if (e.PropertyName is nameof(AppModel.DeviceName) or nameof(AppModel.Native) or nameof(AppModel.Quickshare) or nameof(AppModel.Airdrop) or nameof(AppModel.SortMedia) or nameof(AppModel.RequirePin) or null)
+            if (e.PropertyName is nameof(AppModel.DeviceName) or nameof(AppModel.Native) or nameof(AppModel.Quickshare) or nameof(AppModel.Airdrop) or nameof(AppModel.SortMedia) or nameof(AppModel.RequirePin) or nameof(AppModel.LaunchAtLogin) or nameof(AppModel.RunInBackground) or null)
             {
                 Sync();
             }
@@ -56,6 +56,8 @@ public sealed partial class SettingsWindow : UserControl
         AirDropSwitch.IsOn = _model.Airdrop;
         SortSwitch.IsOn = _model.SortMedia;
         PinSwitch.IsOn = _model.RequirePin;
+        LoginSwitch.IsOn = _model.LaunchAtLogin;
+        BackgroundSwitch.IsOn = _model.RunInBackground;
         _syncing = false;
     }
 
@@ -104,6 +106,26 @@ public sealed partial class SettingsWindow : UserControl
         }
 
         _model.SetProtocols(NativeSwitch.IsOn, QuickSwitch.IsOn, AirDropSwitch.IsOn, SortSwitch.IsOn, PinSwitch.IsOn);
+    }
+
+    void Login_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        _model.SetLaunchAtLogin(LoginSwitch.IsOn);
+    }
+
+    void Background_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        _model.SetRunInBackground(BackgroundSwitch.IsOn);
     }
 
     void Copy_Click(object sender, RoutedEventArgs e) => _model.CopyFingerprint();
